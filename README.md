@@ -1,123 +1,121 @@
-# Bot Discord de transcription
+# Discord Transcription Bot
 
-Un bot Discord qui rejoint un salon vocal sur commande, enregistre la voix de
-**chaque participant séparément**, puis délègue la transcription à **Gemini** en
-fin de session pour produire un **transcript fusionné chronologique** (qui a dit
-quoi, dans l'ordre, horodaté). Le résultat est publié dans le canal texte.
+A Discord bot that joins a voice channel on command, records **each participant
+separately**, then delegates transcription to **Gemini** at the end of the
+session to produce a **merged chronological transcript** (who said what, in
+order, timestamped). The result is posted in the text channel.
 
-> Conception détaillée : [docs/superpowers/specs/2026-05-31-discord-transcription-bot-design.md](docs/superpowers/specs/2026-05-31-discord-transcription-bot-design.md)
+> Detailed design (in French):
+> [docs/superpowers/specs/2026-05-31-discord-transcription-bot-design.md](docs/superpowers/specs/2026-05-31-discord-transcription-bot-design.md)
 
-## Comment ça marche
+## How it works
 
-- `/record` → le bot rejoint ton salon vocal, **annonce l'enregistrement** et
-  capture le flux audio de chaque utilisateur dans un `.ogg` distinct (un fichier
-  par prise de parole), en loggant le timing dans `timeline.json`.
-- `/stop` → le bot quitte le vocal, envoie l'audio + le contexte à Gemini,
-  reçoit le texte par prise de parole, le fusionne chronologiquement à partir de
-  la timeline, et poste `transcript.md` + `transcript.json` dans le canal.
+- `/record` → the bot joins your voice channel, **announces the recording**, and
+  captures each user's audio into a separate `.ogg` (one file per utterance),
+  logging the timing in `timeline.json`.
+- `/stop` → the bot leaves the voice channel, sends the audio + context to
+  Gemini, gets back the text per utterance, merges it chronologically from the
+  timeline, and posts `transcript.md` + `transcript.json` in the channel.
 
-Discord livre déjà un flux audio **séparé par utilisateur** : aucune diarisation
-à faire, un fichier = un locuteur. L'Opus est décodé en PCM (via
-`@discordjs/opus`) puis ré-encodé en **Opus/Ogg 16 kHz mono** via ffmpeg —
-fichiers minuscules, qualité de transcription intacte (Gemini ré-échantillonne à
-16 kHz de toute façon). Le binaire ffmpeg est fourni par `ffmpeg-static` : aucune
-installation système requise.
+Discord already delivers a **per-user audio stream**: no diarization needed, one
+file = one speaker. Opus is decoded to PCM (via `@discordjs/opus`) then
+re-encoded to **Opus/Ogg 16 kHz mono** via ffmpeg — tiny files, with no loss in
+transcription quality (Gemini resamples to 16 kHz anyway). The ffmpeg binary is
+provided by `ffmpeg-static`: no system install required.
 
-> ⚠️ **RGPD / consentement.** Le bot envoie la voix des participants à Google
-> (API Gemini) et l'annonce au démarrage. Prévu pour un serveur privé avec des
-> participants informés. À recadrer juridiquement si le bot devient public.
+> ⚠️ **GDPR / consent.** The bot sends participants' voices to Google (Gemini
+> API) and announces it on start. Intended for a private server with informed
+> participants. Revisit the legal aspects if the bot becomes public.
 
-## Prérequis
+## Requirements
 
 - **Node.js ≥ 22.12**
-- Un **bot Discord** (token + client ID)
-- Une **clé API Gemini** (Google AI Studio)
-- **ffmpeg** : pas besoin de l'installer, le binaire est fourni par le paquet
-  `ffmpeg-static` (téléchargé pendant `npm install`).
-- Pour l'installation des modules natifs (`sodium-native`, `@discordjs/opus`) :
-  - **Windows** : généralement des binaires précompilés sont récupérés
-    automatiquement. En cas d'échec de compilation, installe les outils de build
-    (`npm install --global windows-build-tools` ou « Desktop development with
-    C++ » via Visual Studio Build Tools, + Python 3).
-  - **Debian/Linux** : `apt-get install build-essential python3` (déjà géré par
-    le `Dockerfile`).
+- A **Discord bot** (token + client ID)
+- A **Gemini API key** (Google AI Studio)
+- **ffmpeg**: no need to install it — the binary ships with the `ffmpeg-static`
+  package (downloaded during `npm install`).
+- For the native modules (`sodium-native`, `@discordjs/opus`):
+  - **Windows**: prebuilt binaries are usually fetched automatically. If the
+    build fails, install the build tools ("Desktop development with C++" via
+    Visual Studio Build Tools, + Python 3).
+  - **Debian/Linux**: `apt-get install build-essential python3` (already handled
+    by the `Dockerfile`).
 
-## Installation
+## Install
 
 ```bash
 npm install
-cp .env.example .env   # puis remplis les valeurs
+cp .env.example .env   # then fill in the values
 ```
 
-### Créer le bot Discord
+### Create the Discord bot
 
 1. <https://discord.com/developers/applications> → **New Application**.
-2. Onglet **Bot** → **Reset Token** → copie le token dans `DISCORD_TOKEN`.
-3. Onglet **General Information** → copie l'**Application ID** dans
+2. **Bot** tab → **Reset Token** → copy the token into `DISCORD_TOKEN`.
+3. **General Information** tab → copy the **Application ID** into
    `DISCORD_CLIENT_ID`.
-4. Onglet **Bot** → active l'intent **Server Members Intent** (utile pour les
-   noms d'affichage). L'intent *Voice State* est couvert par défaut.
-5. **Inviter le bot** : onglet **OAuth2 → URL Generator**, scopes `bot` +
+4. **Bot** tab → enable the **Server Members Intent** (used for display names).
+   The *Voice State* intent is enabled by default.
+5. **Invite the bot**: **OAuth2 → URL Generator** tab, scopes `bot` +
    `applications.commands`, permissions **Connect**, **Speak**, **Send
-   Messages**, **Attach Files**. Ouvre l'URL générée pour l'ajouter à ton
-   serveur.
+   Messages**, **Attach Files**. Open the generated URL to add it to your server.
 
-### Clé Gemini
+### Gemini key
 
-<https://aistudio.google.com/apikey> → crée une clé, mets-la dans
-`GEMINI_API_KEY`. Modèle par défaut : `gemini-2.5-flash` (rapide et économique).
+<https://aistudio.google.com/apikey> → create a key and put it in
+`GEMINI_API_KEY`. Default model: `gemini-2.5-flash` (fast and cheap).
 
-### Variables d'environnement
+### Environment variables
 
-Voir [.env.example](.env.example). En dev, renseigne `GUILD_ID` (l'ID de ton
-serveur de test) pour que les slash commands apparaissent **immédiatement** ;
-sans lui, l'enregistrement est global et peut prendre jusqu'à ~1h à se propager.
+See [.env.example](.env.example). In development, set `GUILD_ID` (your test
+server's ID) so the slash commands appear **immediately**; without it,
+registration is global and can take up to ~1h to propagate.
 
-## Lancer
+## Run
 
 ```bash
 npm start
 ```
 
-Puis sur Discord : rejoins un salon vocal, tape `/record`, parle, puis `/stop`.
+Then in Discord: join a voice channel, type `/record`, talk, then `/stop`.
 
 ## Tests
 
-Les fonctions pures (fusion, formatage, parsing de la réponse Gemini) sont
-couvertes par des tests qui tournent **sans token ni dépendances réseau** :
+The pure functions (merging, formatting, parsing Gemini's response, WAV/Opus
+encoding) are covered by tests that run **without a token or network
+dependencies** (the ffmpeg encode test uses the bundled `ffmpeg-static`):
 
 ```bash
 npm test
 ```
 
-La capture audio en direct (`recording/recorder.js`) n'est pas couverte par des
-tests automatisés — elle se vérifie manuellement en conditions réelles
-(`/record` → parler → `/stop`).
+Live audio capture (`recording/recorder.js`) is not covered by automated tests —
+verify it manually in real conditions (`/record` → talk → `/stop`).
 
-## Déploiement Docker (Debian)
+## Docker deployment (Debian)
 
 ```bash
 docker build -t discord-transcription-bot .
 docker run --env-file .env -v "$PWD/storage:/app/storage" discord-transcription-bot
 ```
 
-Le volume `storage/` conserve l'audio et les transcripts entre les exécutions.
+The `storage/` volume keeps audio and transcripts across runs.
 
 ## Structure
 
 ```
 src/
-  index.js                  # client Discord, enregistrement des commandes, routage
-  config.js                 # chargement/validation du .env
-  commands/record.js        # /record : rejoint le vocal, démarre la capture
-  commands/stop.js          # /stop  : transcrit, fusionne, publie
-  recording/session.js      # état d'une session (chemins, timeline, noms)
-  recording/recorder.js     # capture Opus -> PCM -> ffmpeg -> .ogg + log du timing
-  recording/encode.js       # ré-encodage PCM -> Opus/Ogg 16k mono (ffmpeg)
-  recording/registry.js     # sessions actives par serveur
-  transcription/gemini.js       # appel réseau Gemini
-  transcription/gemini-core.js  # construction requête / parsing (pur, testé)
-  transcription/merge.js        # fusion chronologique + rendu md/json (pur, testé)
-  output/publish.js         # post Discord + pièces jointes
-storage/                    # données par session (audio + transcripts), gitignored
+  index.js                  # Discord client, command registration, routing
+  config.js                 # loads/validates .env
+  commands/record.js        # /record: joins voice, starts capture
+  commands/stop.js          # /stop: transcribes, merges, publishes
+  recording/session.js      # session state (paths, timeline, names)
+  recording/recorder.js     # capture Opus -> PCM -> ffmpeg -> .ogg + timing log
+  recording/encode.js       # re-encode PCM -> Opus/Ogg 16k mono (ffmpeg)
+  recording/registry.js     # active sessions per server
+  transcription/gemini.js       # Gemini network call
+  transcription/gemini-core.js  # request building / parsing (pure, tested)
+  transcription/merge.js        # chronological merge + md/json render (pure, tested)
+  output/publish.js         # Discord post + attachments
+storage/                    # per-session data (audio + transcripts), gitignored
 ```
