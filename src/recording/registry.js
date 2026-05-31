@@ -1,4 +1,4 @@
-// Sessions d'enregistrement actives, indexées par guildId.
+// Active recording sessions, keyed by guildId.
 const sessions = new Map();
 
 export function getSession(guildId) {

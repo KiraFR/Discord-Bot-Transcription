@@ -4,24 +4,24 @@ import { encodePcmToOpus } from './encode.js';
 
 const SAMPLE_RATE = 48000;
 const CHANNELS = 2;
-const OUT_RATE = 16000; // Gemini ré-échantillonne à 16 kHz : inutile d'envoyer plus
+const OUT_RATE = 16000; // Gemini resamples to 16 kHz: no point sending more
 const BITRATE = '24k';
 
 /**
- * Branche l'enregistrement sur une connexion vocale : à chaque prise de parole,
- * capture le flux Opus, le décode en PCM, le ré-encode en Opus/Ogg 16 kHz mono
- * (via ffmpeg) et logge son timing.
+ * Attach recording to a voice connection: on each turn of speech, capture the
+ * Opus stream, decode it to PCM, re-encode to Opus/Ogg 16 kHz mono (via ffmpeg)
+ * and log its timing.
  */
 export function attachRecorder(connection, session, { silenceMs = 800 } = {}) {
   const receiver = connection.receiver;
-  const active = new Set(); // évite les doubles abonnements pendant une prise de parole
+  const active = new Set(); // avoid double-subscribing during a single turn
 
   receiver.speaking.on('start', (userId) => {
     if (active.has(userId)) return;
     active.add(userId);
 
     const promise = captureUtterance(receiver, userId, session, silenceMs)
-      .catch((err) => console.error(`[recorder] capture ${userId} échouée :`, err))
+      .catch((err) => console.error(`[recorder] capture for ${userId} failed:`, err))
       .finally(() => {
         active.delete(userId);
         session.pending.delete(promise);
@@ -35,24 +35,24 @@ async function captureUtterance(receiver, userId, session, silenceMs) {
   const displayName = session.resolveName(userId);
   const { index, file } = session.reserveUtterance(userId);
 
-  // Flux Opus brut, terminé après `silenceMs` de silence = fin de la prise de parole.
+  // Raw Opus stream, ended after `silenceMs` of silence = end of the turn.
   const opusStream = receiver.subscribe(userId, {
     end: { behavior: EndBehaviorType.AfterSilence, duration: silenceMs },
   });
   session.activeStreams.add(opusStream);
 
-  // Opus 48 kHz stéréo -> PCM s16le (via @discordjs/opus).
+  // Opus 48 kHz stereo -> PCM s16le (via @discordjs/opus).
   const decoder = new prism.opus.Decoder({
     rate: SAMPLE_RATE,
     channels: CHANNELS,
     frameSize: 960,
   });
   opusStream.on('error', (err) => decoder.destroy(err));
-  // Si le flux se ferme sans 'end' (connexion/abonnement coupé à /stop), on
-  // termine le décodeur pour que ffmpeg finalise le fichier et que la capture
-  // se résolve au lieu de rester pendante.
+  // If the stream closes without 'end' (connection/subscription cut at /stop),
+  // end the decoder so ffmpeg finalizes the file and the capture resolves
+  // instead of hanging.
   opusStream.once('close', () => {
-    if (!decoder.writableEnded) decoder.end();
+    if (!decoder.destroyed && !decoder.writableEnded) decoder.end();
   });
 
   try {
@@ -72,12 +72,17 @@ async function captureUtterance(receiver, userId, session, silenceMs) {
       endMs: session.durationMs(),
       file,
     });
+  } catch (err) {
+    // Tear down both ends so nothing is left hanging on failure.
+    opusStream.destroy();
+    decoder.destroy();
+    throw err;
   } finally {
     session.activeStreams.delete(opusStream);
   }
 }
 
-/** Coupe tous les abonnements audio en cours (à appeler à l'arrêt de la session). */
+/** Cut all in-progress audio subscriptions (call when stopping the session). */
 export function stopAllStreams(session) {
   for (const stream of session.activeStreams) {
     stream.destroy();
@@ -85,10 +90,17 @@ export function stopAllStreams(session) {
 }
 
 /**
- * Attend la fin de toutes les captures en cours, avec un garde-fou : passé
- * `timeoutMs`, on continue quoi qu'il arrive (pour ne jamais figer /stop).
+ * Wait for all in-progress captures to finish, with a safety net: past
+ * `timeoutMs`, proceed regardless so /stop can never hang indefinitely.
  */
 export async function flushPending(session, timeoutMs = 10_000) {
-  const all = Promise.allSettled([...session.pending]);
-  await Promise.race([all, new Promise((resolve) => setTimeout(resolve, timeoutMs))]);
+  let timer;
+  const guard = new Promise((resolve) => {
+    timer = setTimeout(resolve, timeoutMs);
+  });
+  try {
+    await Promise.race([Promise.allSettled([...session.pending]), guard]);
+  } finally {
+    clearTimeout(timer);
+  }
 }

@@ -1,9 +1,13 @@
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync, renameSync } from 'node:fs';
+import { writeFile, rename } from 'node:fs/promises';
 import path from 'node:path';
 
+// Coalesce timeline writes so a busy session doesn't hit the disk on every turn.
+const WRITE_DEBOUNCE_MS = 500;
+
 /**
- * État d'une session d'enregistrement : chemins de stockage, timeline des
- * prises de parole, résolution des noms. Une instance par serveur actif.
+ * State of a recording session: storage paths, the turn-of-speech timeline, and
+ * name resolution. One instance per active guild.
  */
 export class Session {
   constructor({ guildId, voiceChannelId, textChannel, storageDir, names = new Map() }) {
@@ -19,9 +23,12 @@ export class Session {
 
     this.utterances = [];
     this.nextIndex = 0;
-    this.pending = new Set(); // promesses de capture en cours
-    this.activeStreams = new Set(); // flux Opus en cours (à couper à l'arrêt)
+    this.pending = new Set(); // in-progress capture promises
+    this.activeStreams = new Set(); // in-progress Opus streams (cut on stop)
     this.connection = null;
+
+    this._createdDirs = new Set();
+    this._writeTimer = null;
 
     mkdirSync(this.dir, { recursive: true });
   }
@@ -30,22 +37,25 @@ export class Session {
     return this.names.get(userId) ?? userId;
   }
 
-  /** Réserve un index + un chemin de fichier pour une nouvelle prise de parole. */
+  /** Reserve an index + a file path for a new turn of speech. */
   reserveUtterance(userId) {
     const index = this.nextIndex++;
     const userDir = path.join(this.dir, userId);
-    mkdirSync(userDir, { recursive: true });
+    if (!this._createdDirs.has(userDir)) {
+      mkdirSync(userDir, { recursive: true });
+      this._createdDirs.add(userDir);
+    }
     const file = path.join(userDir, `${String(index).padStart(4, '0')}.ogg`);
     return { index, file };
   }
 
-  /** Enregistre une prise de parole terminée et persiste la timeline. */
+  /** Record a finished turn and schedule a (debounced) timeline write. */
   commitUtterance(entry) {
     this.utterances.push(entry);
-    this.writeTimeline();
+    this._scheduleTimelineWrite();
   }
 
-  writeTimeline() {
+  _serializeTimeline() {
     const data = this.utterances
       .slice()
       .sort((a, b) => a.startMs - b.startMs)
@@ -57,7 +67,30 @@ export class Session {
         endMs: u.endMs,
         file: u.file,
       }));
-    writeFileSync(this.timelinePath, JSON.stringify(data, null, 2), 'utf8');
+    return JSON.stringify(data, null, 2);
+  }
+
+  _scheduleTimelineWrite() {
+    if (this._writeTimer) return;
+    this._writeTimer = setTimeout(() => {
+      this._writeTimer = null;
+      const tmp = `${this.timelinePath}.tmp`;
+      // Atomic: write to a temp file then rename over the target.
+      writeFile(tmp, this._serializeTimeline(), 'utf8')
+        .then(() => rename(tmp, this.timelinePath))
+        .catch((err) => console.error('[session] timeline write failed:', err));
+    }, WRITE_DEBOUNCE_MS);
+  }
+
+  /** Force a final, synchronous, atomic flush of the timeline (used by /stop). */
+  writeTimeline() {
+    if (this._writeTimer) {
+      clearTimeout(this._writeTimer);
+      this._writeTimer = null;
+    }
+    const tmp = `${this.timelinePath}.tmp`;
+    writeFileSync(tmp, this._serializeTimeline(), 'utf8');
+    renameSync(tmp, this.timelinePath);
   }
 
   durationMs() {

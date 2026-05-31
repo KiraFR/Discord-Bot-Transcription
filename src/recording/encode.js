@@ -6,11 +6,11 @@ function ffmpegArgs(inRate, inChannels, outRate, bitrate) {
   return [
     '-hide_banner',
     '-loglevel', 'error',
-    '-f', 's16le', // entrée : PCM brut
+    '-f', 's16le', // input: raw PCM
     '-ar', String(inRate),
     '-ac', String(inChannels),
     '-i', 'pipe:0',
-    '-ar', String(outRate), // sortie : ré-échantillonnée
+    '-ar', String(outRate), // output: resampled
     '-ac', '1', // mono
     '-c:a', 'libopus',
     '-b:a', bitrate,
@@ -20,11 +20,14 @@ function ffmpegArgs(inRate, inChannels, outRate, bitrate) {
 }
 
 /**
- * Encode un flux PCM s16le en Opus/Ogg (mono, ré-échantillonné) dans `file`.
+ * Encode a PCM s16le stream into Opus/Ogg (mono, resampled) at `file`.
  *
- * @param {import('node:stream').Readable} pcmStream  PCM s16le entrelacé
- * @param {string} file  chemin de sortie .ogg
- * @returns {Promise<void>} résolue quand ffmpeg a terminé et le fichier est écrit
+ * On any error the ffmpeg process is killed and the output stream destroyed, so
+ * no zombie process or open file descriptor is left behind.
+ *
+ * @param {import('node:stream').Readable} pcmStream  interleaved PCM s16le
+ * @param {string} file  output .ogg path
+ * @returns {Promise<void>} resolves once ffmpeg exits and the file is written
  */
 export function encodePcmToOpus(pcmStream, file, opts = {}) {
   const { inRate = 48000, inChannels = 2, outRate = 16000, bitrate = '24k' } = opts;
@@ -38,10 +41,21 @@ export function encodePcmToOpus(pcmStream, file, opts = {}) {
     let ffDone = false;
     let outDone = false;
 
+    const cleanup = () => {
+      try {
+        ff.kill('SIGKILL');
+      } catch {
+        /* already gone */
+      }
+      out.destroy();
+      pcmStream.destroy();
+    };
+
     const finish = (err) => {
       if (settled) return;
       if (err) {
         settled = true;
+        cleanup();
         reject(err);
       } else if (ffDone && outDone) {
         settled = true;
@@ -52,8 +66,8 @@ export function encodePcmToOpus(pcmStream, file, opts = {}) {
     ff.stderr.on('data', (d) => {
       stderr += d.toString();
     });
-    ff.on('error', finish); // ex. binaire ffmpeg introuvable
-    ff.stdin.on('error', () => {}); // EPIPE si ffmpeg meurt avant la fin du pipe
+    ff.on('error', finish); // e.g. ffmpeg binary not found
+    ff.stdin.on('error', () => {}); // EPIPE if ffmpeg dies before the pipe ends
     pcmStream.on('error', finish);
     out.on('error', finish);
 
@@ -61,7 +75,7 @@ export function encodePcmToOpus(pcmStream, file, opts = {}) {
 
     ff.on('close', (code) => {
       if (code !== 0) {
-        finish(new Error(`ffmpeg a échoué (code ${code}) : ${stderr.trim()}`));
+        finish(new Error(`ffmpeg failed (code ${code}): ${stderr.trim()}`));
       } else {
         ffDone = true;
         finish();
