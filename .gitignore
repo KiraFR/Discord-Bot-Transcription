@@ -1,0 +1,17 @@
+# Dépendances
+node_modules/
+
+# Secrets / config locale
+.env
+.env.local
+
+# Données de session (audio + transcripts générés)
+storage/
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS
+Thumbs.db
+.DS_Store
