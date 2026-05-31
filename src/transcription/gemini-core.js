@@ -46,12 +46,14 @@ export function buildParts(entries, meta) {
 }
 
 /**
- * Split utterances into batches whose cumulative size stays under `maxBytes`,
- * to remain below the inline request limit. Size is taken from `audioBase64`
- * length when present, otherwise from a pre-computed `size` field, plus a fixed
- * per-entry overhead for the marker/JSON.
+ * Split utterances into batches that stay under BOTH a cumulative size
+ * (`maxBytes`, to remain below the inline request limit) and a count
+ * (`maxCount`, to avoid a request with an unwieldy number of parts). A new
+ * batch starts as soon as either limit would be exceeded. Size is taken from
+ * `audioBase64` length when present, otherwise from a pre-computed `size`
+ * field, plus a fixed per-entry overhead for the marker/JSON.
  */
-export function chunkBySize(entries, maxBytes) {
+export function chunkBySize(entries, maxBytes, maxCount = Infinity) {
   const sizeOf = (e) =>
     (e.audioBase64 ? e.audioBase64.length : (e.size ?? 0)) + MARKER_OVERHEAD_BYTES;
 
@@ -60,7 +62,9 @@ export function chunkBySize(entries, maxBytes) {
   let size = 0;
   for (const e of entries) {
     const entrySize = sizeOf(e);
-    if (current.length > 0 && size + entrySize > maxBytes) {
+    const tooBig = size + entrySize > maxBytes;
+    const tooMany = current.length >= maxCount;
+    if (current.length > 0 && (tooBig || tooMany)) {
       batches.push(current);
       current = [];
       size = 0;

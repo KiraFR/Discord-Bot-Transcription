@@ -135,6 +135,12 @@ test('chunkBySize keeps a single batch when everything fits', () => {
   assert.equal(batches[0].length, 2);
 });
 
+test('chunkBySize caps batches by utterance count', () => {
+  const entries = Array.from({ length: 5 }, (_, i) => ({ index: i, audioBase64: 'a' }));
+  const batches = chunkBySize(entries, 1_000_000, 2); // size never the limit
+  assert.deepEqual(batches.map((b) => b.length), [2, 2, 1]);
+});
+
 test('buildParts interleaves text marker + audio and starts with the preamble', () => {
   const parts = buildParts(
     [{ index: 3, displayName: 'Alice', startMs: 5000, audioBase64: 'ZZ', mimeType: 'audio/ogg' }],

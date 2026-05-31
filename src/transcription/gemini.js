@@ -18,6 +18,9 @@ const RESPONSE_SCHEMA = {
 // request limit, leaving headroom for markers/preamble/JSON overhead.
 // Sessions larger than this are split across several requests.
 const MAX_BATCH_BASE64 = 8 * 1024 * 1024;
+// Also cap the number of utterances per request so a long meeting doesn't
+// produce a single request with hundreds of audio parts.
+const MAX_BATCH_UTTERANCES = 150;
 // base64 inflates raw bytes by ~4/3.
 const BASE64_RATIO = 4 / 3;
 
@@ -125,7 +128,7 @@ export async function transcribeSession(timeline, { apiKey, model, lang, glossar
   }
 
   const ai = new GoogleGenAI({ apiKey, httpOptions: { timeout: REQUEST_TIMEOUT_MS } });
-  const batches = chunkBySize(sized, MAX_BATCH_BASE64);
+  const batches = chunkBySize(sized, MAX_BATCH_BASE64, MAX_BATCH_UTTERANCES);
   const meta = { model, lang, glossary, participants };
   const results = [];
 
