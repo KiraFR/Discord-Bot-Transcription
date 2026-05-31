@@ -20,6 +20,7 @@ export class Session {
     this.utterances = [];
     this.nextIndex = 0;
     this.pending = new Set(); // promesses de capture en cours
+    this.activeStreams = new Set(); // flux Opus en cours (à couper à l'arrêt)
     this.connection = null;
 
     mkdirSync(this.dir, { recursive: true });

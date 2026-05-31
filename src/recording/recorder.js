@@ -39,6 +39,7 @@ async function captureUtterance(receiver, userId, session, silenceMs) {
   const opusStream = receiver.subscribe(userId, {
     end: { behavior: EndBehaviorType.AfterSilence, duration: silenceMs },
   });
+  session.activeStreams.add(opusStream);
 
   // Opus 48 kHz stéréo -> PCM s16le (via @discordjs/opus).
   const decoder = new prism.opus.Decoder({
@@ -47,26 +48,47 @@ async function captureUtterance(receiver, userId, session, silenceMs) {
     frameSize: 960,
   });
   opusStream.on('error', (err) => decoder.destroy(err));
-
-  // PCM -> ffmpeg -> Opus/Ogg 16 kHz mono.
-  await encodePcmToOpus(opusStream.pipe(decoder), file, {
-    inRate: SAMPLE_RATE,
-    inChannels: CHANNELS,
-    outRate: OUT_RATE,
-    bitrate: BITRATE,
+  // Si le flux se ferme sans 'end' (connexion/abonnement coupé à /stop), on
+  // termine le décodeur pour que ffmpeg finalise le fichier et que la capture
+  // se résolve au lieu de rester pendante.
+  opusStream.once('close', () => {
+    if (!decoder.writableEnded) decoder.end();
   });
 
-  session.commitUtterance({
-    index,
-    userId,
-    displayName,
-    startMs,
-    endMs: session.durationMs(),
-    file,
-  });
+  try {
+    // PCM -> ffmpeg -> Opus/Ogg 16 kHz mono.
+    await encodePcmToOpus(opusStream.pipe(decoder), file, {
+      inRate: SAMPLE_RATE,
+      inChannels: CHANNELS,
+      outRate: OUT_RATE,
+      bitrate: BITRATE,
+    });
+
+    session.commitUtterance({
+      index,
+      userId,
+      displayName,
+      startMs,
+      endMs: session.durationMs(),
+      file,
+    });
+  } finally {
+    session.activeStreams.delete(opusStream);
+  }
 }
 
-/** Attend la fin de toutes les captures en cours (à appeler avant de transcrire). */
-export async function flushPending(session) {
-  await Promise.allSettled([...session.pending]);
+/** Coupe tous les abonnements audio en cours (à appeler à l'arrêt de la session). */
+export function stopAllStreams(session) {
+  for (const stream of session.activeStreams) {
+    stream.destroy();
+  }
+}
+
+/**
+ * Attend la fin de toutes les captures en cours, avec un garde-fou : passé
+ * `timeoutMs`, on continue quoi qu'il arrive (pour ne jamais figer /stop).
+ */
+export async function flushPending(session, timeoutMs = 10_000) {
+  const all = Promise.allSettled([...session.pending]);
+  await Promise.race([all, new Promise((resolve) => setTimeout(resolve, timeoutMs))]);
 }

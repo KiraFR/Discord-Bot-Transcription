@@ -2,7 +2,7 @@ import { SlashCommandBuilder, MessageFlags } from 'discord.js';
 import { writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { getSession, clearSession } from '../recording/registry.js';
-import { flushPending } from '../recording/recorder.js';
+import { flushPending, stopAllStreams } from '../recording/recorder.js';
 import { transcribeSession } from '../transcription/gemini.js';
 import { mergeTranscript, renderMarkdown, renderJson } from '../transcription/merge.js';
 import { publishTranscript } from '../output/publish.js';
@@ -25,11 +25,12 @@ export async function execute(interaction) {
 
   await interaction.deferReply();
 
-  // Quitte le vocal et laisse les captures en cours se terminer.
-  session.connection?.destroy();
-  console.log(`[stop] connexion fermée ; attente de ${session.pending.size} capture(s)…`);
+  // Coupe les captures en cours, attend qu'elles écrivent, puis quitte le vocal.
+  stopAllStreams(session);
+  console.log(`[stop] arrêt des captures ; attente de ${session.pending.size} en cours…`);
   await flushPending(session);
   console.log('[stop] captures terminées.');
+  session.connection?.destroy();
   session.writeTimeline();
 
   if (session.utterances.length === 0) {
