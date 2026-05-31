@@ -27,7 +27,9 @@ export async function execute(interaction) {
 
   // Quitte le vocal et laisse les captures en cours se terminer.
   session.connection?.destroy();
+  console.log(`[stop] connexion fermée ; attente de ${session.pending.size} capture(s)…`);
   await flushPending(session);
+  console.log('[stop] captures terminées.');
   session.writeTimeline();
 
   if (session.utterances.length === 0) {
@@ -36,6 +38,7 @@ export async function execute(interaction) {
   }
 
   try {
+    console.log(`[stop] envoi de ${session.utterances.length} utterance(s) à Gemini (${config.geminiModel})…`);
     const results = await transcribeSession(session.utterances, {
       apiKey: config.geminiApiKey,
       model: config.geminiModel,
@@ -43,6 +46,7 @@ export async function execute(interaction) {
       glossary: config.glossary,
       participants: session.participants(),
     });
+    console.log(`[stop] Gemini a répondu : ${results.length} segment(s).`);
 
     const merged = mergeTranscript(session.utterances, results);
     const markdown = renderMarkdown(merged, {
@@ -67,8 +71,13 @@ export async function execute(interaction) {
     await interaction.editReply('✅ Transcription publiée.');
   } catch (err) {
     console.error('[stop] transcription échouée :', err);
+    const isQuota =
+      err?.status === 429 || /RESOURCE_EXHAUSTED|quota|credits|crédits/i.test(err?.message ?? '');
+    const reason = isQuota
+      ? 'quota / crédits Gemini épuisés — vérifie la facturation de ton projet sur AI Studio.'
+      : err.message;
     await interaction.editReply(
-      `❌ La transcription a échoué : ${err.message}\n` +
+      `❌ La transcription a échoué : ${reason}\n` +
         `L’audio est conservé dans \`${session.dir}\` pour réessayer.`,
     );
   }

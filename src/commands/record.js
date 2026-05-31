@@ -52,9 +52,23 @@ export async function execute(interaction) {
     selfMute: true,
   });
 
+  // Instrumentation : trace les transitions d'état pour diagnostiquer un échec
+  // de connexion vocale (reste en signalling/connecting, passe en disconnected…).
+  connection.on('stateChange', (oldState, newState) => {
+    console.log(`[voice] état : ${oldState.status} -> ${newState.status}`);
+  });
+  connection.on('error', (err) => {
+    console.error('[voice] erreur de connexion :', err);
+  });
+
   try {
     await entersState(connection, VoiceConnectionStatus.Ready, 20_000);
-  } catch {
+  } catch (err) {
+    console.error(
+      `[voice] jamais "ready" en 20 s — dernier état : ${connection.state.status}`,
+      '| détail :',
+      err?.message ?? err,
+    );
     connection.destroy();
     await interaction.editReply('Impossible de se connecter au salon vocal.');
     return;
