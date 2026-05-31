@@ -5,7 +5,7 @@ separately**, then delegates transcription to **Gemini** at the end of the
 session to produce a **merged chronological transcript** (who said what, in
 order, timestamped). The result is posted in the text channel.
 
-> Detailed design (in French):
+> Detailed design:
 > [docs/superpowers/specs/2026-05-31-discord-transcription-bot-design.md](docs/superpowers/specs/2026-05-31-discord-transcription-bot-design.md)
 
 ## How it works

@@ -57,7 +57,7 @@ async function generateWithRetry(ai, { model, parts, label }) {
       lastErr = err;
       if (attempt < MAX_ATTEMPTS && isRetryable(err)) {
         const backoff = 500 * 2 ** (attempt - 1);
-        console.warn(`[gemini] ${label} échec (tentative ${attempt}/${MAX_ATTEMPTS}) : ${err.message} — retry dans ${backoff}ms`);
+        console.warn(`[gemini] ${label} failed (attempt ${attempt}/${MAX_ATTEMPTS}): ${err.message} — retrying in ${backoff}ms`);
         await sleep(backoff);
         continue;
       }
@@ -82,7 +82,7 @@ async function transcribeBatch(ai, batch, meta) {
 
   if ((finishReason === 'MAX_TOKENS' || !response.text) && batch.length > 1) {
     const mid = Math.ceil(batch.length / 2);
-    console.warn(`[gemini] ${label} tronqué/incomplet (finishReason=${finishReason}) — découpage en deux.`);
+    console.warn(`[gemini] ${label} truncated/incomplete (finishReason=${finishReason}) — splitting in two.`);
     const left = await transcribeBatch(ai, batch.slice(0, mid), meta);
     const right = await transcribeBatch(ai, batch.slice(mid), meta);
     return [...left, ...right];
@@ -90,7 +90,7 @@ async function transcribeBatch(ai, batch, meta) {
 
   if (!response.text) {
     // Single utterance with no usable text: surface it rather than crash the run.
-    console.warn(`[gemini] ${label} sans texte (finishReason=${finishReason}, blockReason=${blockReason ?? 'aucun'}).`);
+    console.warn(`[gemini] ${label} returned no text (finishReason=${finishReason}, blockReason=${blockReason ?? 'none'}).`);
     return batch.map((e) => ({ index: e.index, text: '' }));
   }
 
@@ -147,7 +147,7 @@ export async function transcribeSession(timeline, { apiKey, model, lang, glossar
       results.push(...(await transcribeBatch(ai, entries, meta)));
     } catch (err) {
       // One failed batch must not lose the rest of the session.
-      console.error(`[gemini] batch [${batch[0].index}..${batch.at(-1).index}] échoué définitivement : ${err.message}`);
+      console.error(`[gemini] batch [${batch[0].index}..${batch.at(-1).index}] permanently failed: ${err.message}`);
       // Leave these indices absent so merge marks them as missing.
     }
   }

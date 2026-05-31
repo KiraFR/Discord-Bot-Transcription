@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Bot Discord qui enregistre la voix par utilisateur et la transcrit via Gemini.",
+  "description": "Discord bot that records each user's voice and transcribes it via Gemini.",
   "engines": {
     "node": ">=22.12"
   },

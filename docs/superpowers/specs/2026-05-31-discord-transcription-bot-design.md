@@ -1,151 +1,156 @@
-# Bot Discord de transcription — Design
+# Discord Transcription Bot — Design
 
-**Date :** 2026-05-31
-**Statut :** validé (en attente de relecture finale avant plan d'implémentation)
+**Date:** 2026-05-31
+**Status:** approved (implemented; this is the design record)
 
-## Objectif
+## Goal
 
-Un bot Discord qui rejoint un canal vocal sur commande, enregistre la voix de
-chaque participant séparément, puis délègue la transcription à Gemini en fin de
-session pour produire un **transcript fusionné chronologique** (qui a dit quoi,
-dans l'ordre, horodaté). Le résultat est publié dans le canal texte.
+A Discord bot that joins a voice channel on command, records each participant
+separately, then delegates transcription to Gemini at the end of the session to
+produce a **merged chronological transcript** (who said what, in order,
+timestamped). The result is posted in the text channel.
 
-## Choix d'architecture clés
+## Key architecture choices
 
-- **Batch, pas live.** On enregistre pendant la session et on transcrit en une
-  fois à la fin (`/stop`). Cela supprime tout le pipeline temps réel (streaming
-  STT, resampling ffmpeg, orchestration par utterance, GPU local).
-- **Une seule app Node.js.** Pas de service STT séparé : Gemini est distant.
-- **Transcription déléguée à Gemini.** Audio + métadonnées de timing envoyés à
-  l'API Google Gen AI ; Gemini fournit le texte, notre code fournit l'ordre et
-  les horodatages.
-- **Pas de diarisation à faire.** Discord livre déjà un flux Opus par
-  utilisateur (mapping SSRC → user ID) : un fichier = un locuteur.
+- **Batch, not live.** We record during the session and transcribe once at the
+  end (`/stop`). This removes the entire real-time pipeline (streaming STT,
+  ffmpeg resampling, per-utterance orchestration, local GPU).
+- **A single Node.js app.** No separate STT service: Gemini is remote.
+- **Transcription delegated to Gemini.** Audio + timing metadata sent to the
+  Google Gen AI API; Gemini provides the text, our code provides the order and
+  timestamps.
+- **No diarization needed.** Discord already delivers a per-user Opus stream
+  (SSRC → user ID mapping): one file = one speaker.
 
-### Compromis RGPD assumé
+### Accepted GDPR trade-off
 
-La voix des participants est envoyée à Google (API Gemini). C'est acceptable
-pour un usage de serveur privé avec des participants informés. Le bot **annonce
-l'enregistrement** à `/record`. À recadrer si le bot devient public.
+Participants' voices are sent to Google (Gemini API). Acceptable for private
+server use with informed participants. The bot **announces the recording** at
+`/record`. Revisit if the bot becomes public.
 
-## Flux de bout en bout
+## End-to-end flow
 
 ```
-/record → rejoint le vocal de l'appelant (selfDeaf:false)
-        → annonce "🔴 enregistrement en cours pour transcription"
-        → pour chaque user qui parle : capture Opus → écrit un .ogg par prise de parole
-        → logge le timing de chaque prise de parole dans timeline.json
-/stop   → quitte le vocal, finalise les fichiers
-        → construit la requête Gemini (audio trié + contexte) → JSON structuré
-        → fusionne en transcript chronologique
-        → poste un résumé + joint transcript.md et transcript.json dans le canal
+/record → joins the caller's voice channel (selfDeaf:false)
+        → announces "🔴 recording for transcription"
+        → for each speaking user: capture Opus → write one .ogg per turn
+        → log each turn's timing to timeline.json
+/stop   → leaves voice, finalizes files
+        → builds the Gemini request (sorted audio + context) → structured JSON
+        → merges into a chronological transcript
+        → posts a summary + attaches transcript.md and transcript.json
 ```
 
-## Composants
+## Components
 
-| Composant | Rôle | Dépend de |
-|-----------|------|-----------|
-| `commands/record.js`, `commands/stop.js` | Handlers des slash commands | discord.js, recording |
-| `recording/session.js` | État d'une session : chemins, timeline, participants | — |
-| `recording/recorder.js` | Rejoint le vocal, s'abonne aux flux, écrit les .ogg, logge le timing | @discordjs/voice, prism-media |
-| `transcription/gemini.js` | Construit la requête, appelle Gemini, parse le JSON | @google/genai |
-| `transcription/merge.js` | Trie les utterances, injecte le texte, rend md + json | — (fonctions pures) |
-| `output/publish.js` | Poste le message + joint les fichiers | discord.js |
-| `config.js` | Charge et valide le `.env` | — |
-| `index.js` | Bootstrap client, enregistrement des commandes, wiring des events | tout |
+| Component | Role | Depends on |
+|-----------|------|------------|
+| `commands/record.js`, `commands/stop.js` | Slash-command handlers | discord.js, recording |
+| `recording/session.js` | Session state: paths, timeline, participants | — |
+| `recording/recorder.js` | Joins voice, subscribes to streams, writes .ogg, logs timing | @discordjs/voice, prism-media |
+| `recording/encode.js` | Re-encodes PCM → Opus/Ogg 16k mono (ffmpeg) | ffmpeg-static |
+| `transcription/gemini.js` | Builds the request, calls Gemini, parses JSON | @google/genai |
+| `transcription/merge.js` | Sorts utterances, injects text, renders md + json | — (pure functions) |
+| `output/publish.js` | Posts the message + attaches files | discord.js |
+| `config.js` | Loads and validates `.env` | — |
+| `index.js` | Bootstraps the client, registers commands, wires events | everything |
 
-Chaque unité a un rôle unique et une interface claire ; `merge.js` et le parsing
-de `gemini.js` sont des fonctions pures testables isolément.
+Each unit has a single role and a clear interface; `merge.js` and the parsing in
+`gemini-core.js` are pure functions, testable in isolation.
 
-## Capture audio (détail)
+## Audio capture (detail)
 
-- À chaque `speaking.start` d'un utilisateur (déduplication via un `Set` pour ne
-  s'abonner qu'une fois par prise de parole), on `subscribe` au flux Opus avec
-  `EndBehaviorType.AfterSilence` (durée de silence configurable, ~800 ms).
-- **Décodage Opus → PCM → ffmpeg → Opus/Ogg 16 kHz mono.** Le plan initial
-  (écrire l'Opus brut via `prism.opus.OggLogicalBitstream`) a été abandonné :
-  cette API n'existe que dans une version GitHub/beta de `prism-media`, pas dans
-  le npm stable (1.3.5). On décode donc l'Opus en PCM s16le via
-  `prism.opus.Decoder` (backé par `@discordjs/opus`), puis on **ré-encode via
-  ffmpeg** (`recording/encode.js`) en **Opus/Ogg 16 kHz mono** (~24 kbps). Le
-  binaire ffmpeg est fourni par le paquet `ffmpeg-static` (aucune installation
-  système). Gemini ré-échantillonnant à 16 kHz en interne, le mono 16 kHz ne
-  dégrade pas la transcription, et les fichiers sont ~60× plus petits qu'un WAV
-  48 kHz stéréo : une session entière tient souvent dans un seul appel Gemini.
-- **Un fichier .ogg par prise de parole :**
-  `storage/<guildId>/<sessionId>/<userId>/<index>.ogg` (le `startMs` est dans
+- On each user's `speaking.start` (deduplicated with a `Set` so we subscribe only
+  once per turn), we `subscribe` to the Opus stream with
+  `EndBehaviorType.AfterSilence` (configurable silence duration, ~800 ms).
+- **Opus → PCM → ffmpeg → Opus/Ogg 16 kHz mono.** The initial plan (writing raw
+  Opus via `prism.opus.OggLogicalBitstream`) was dropped: that API only exists in
+  a GitHub/beta build of `prism-media`, not in stable npm (1.3.5). So we decode
+  Opus to s16le PCM via `prism.opus.Decoder` (backed by `@discordjs/opus`), then
+  **re-encode with ffmpeg** (`recording/encode.js`) to **Opus/Ogg 16 kHz mono**
+  (~24 kbps). The ffmpeg binary ships with the `ffmpeg-static` package (no system
+  install). Since Gemini resamples to 16 kHz internally, 16 kHz mono does not
+  degrade transcription, and files are ~60× smaller than 48 kHz stereo WAV: a
+  whole session often fits in a single Gemini call.
+- **One .ogg file per turn:**
+  `storage/<guildId>/<sessionId>/<userId>/<index>.ogg` (`startMs` lives in
   `timeline.json`).
-- En parallèle, `timeline.json` accumule une entrée par prise de parole :
-  `{ userId, displayName, index, startMs, endMs }` où `startMs` est relatif au
-  début de session. **C'est la source de vérité de l'ordre et des horodatages.**
+- In parallel, `timeline.json` accumulates one entry per turn:
+  `{ userId, displayName, index, startMs, endMs }` where `startMs` is relative to
+  the session start. **This is the source of truth for order and timestamps.**
 
-## Transcription Gemini
+## Gemini transcription
 
-**Stratégie retenue (option A — découpage par prise de parole) :**
+**Chosen strategy (option A — per-turn splitting):**
 
-- On construit **un appel Gemini** contenant les utterances triées par `startMs`,
-  chacune en *part audio* (`audio/ogg`) précédée d'un marqueur texte
-  (`Utterance 12 — Alice — 00:03:12`), suivi du **contexte** (noms des
-  participants, glossaire/jargon optionnel) et d'un `responseSchema` =
-  tableau `{ index, text }`.
-- L'horodatage et le locuteur proviennent de **notre** timeline (déterministe) ;
-  Gemini ne fournit que le texte. Alignement fiable, le contexte améliore les
-  noms propres.
+- We build **one Gemini call** containing the utterances sorted by `startMs`,
+  each as an *audio part* (`audio/ogg`) preceded by a text marker
+  (`Utterance 12 — Alice — 00:03:12`), followed by the **context** (participant
+  names, optional glossary/jargon) and a `responseSchema` = array of
+  `{ index, text }`.
+- The timestamp and speaker come from **our** timeline (deterministic); Gemini
+  only provides the text. Reliable alignment, and the context improves proper
+  nouns.
 
-**Sessions longues** (> ~20 Mo de requête ou dépassement de contexte) :
-découpage en fenêtres temporelles, plusieurs appels, concaténation des résultats.
-Au-delà de l'inline (~20 Mo), bascule sur la File API de Gemini.
+**Long sessions** (beyond the ~20 MB inline request limit): split into batches,
+several calls, results concatenated. A batch that gets truncated
+(`finishReason: MAX_TOKENS`) is split in half and retried; transient errors
+(429/5xx) are retried with backoff; a failed batch degrades to missing turns
+rather than failing the whole run. Switching to the Gemini File API for very
+large sessions is a future enhancement (not yet implemented).
 
-**Modèle :** `gemini-2.5-flash` par défaut (rapide, peu cher, bon en audio),
-`gemini-2.5-pro` configurable via `.env` si audio difficile.
-**SDK :** `@google/genai`.
-**Langue :** configurable, français par défaut (hint passé à Gemini).
+**Model:** `gemini-2.5-flash` by default (fast, cheap, good at audio),
+`gemini-2.5-pro` configurable via `.env` for difficult audio.
+**SDK:** `@google/genai`.
+**Language:** configurable, English default (hint passed to Gemini).
 
-## Fusion & sortie
+## Merge & output
 
-- Tri de toutes les utterances par `startMs`, injection du texte renvoyé par
-  Gemini, rendu de deux artefacts :
-  - `transcript.md` : `[HH:MM:SS] Alice : …`, une ligne par prise de parole.
-  - `transcript.json` : `[{ start, end, speaker, userId, text }]`.
-- Le bot poste un court message dans le canal où `/stop` a été tapé et joint les
-  deux fichiers.
-- Les `.ogg` et `timeline.json` sont **conservés sur disque** après publication
-  (permet une retranscription si l'appel Gemini échoue).
+- Sort all utterances by `startMs`, inject the text returned by Gemini, render
+  two artifacts:
+  - `transcript.md`: `[HH:MM:SS] Alice: …`, one line per turn.
+  - `transcript.json`: `[{ start, end, speaker, userId, text }]`.
+- Turns Gemini did not return are kept with a visible `[missing transcription]`
+  marker so data loss is surfaced.
+- The bot posts a short message in the channel where `/stop` was run and attaches
+  both files (oversized attachments are skipped and kept on disk).
+- The `.ogg` files and `timeline.json` are **kept on disk** after publishing
+  (allows re-transcription if the Gemini call fails).
 
-## Commandes & consentement
+## Commands & consent
 
-- `/record` : rejoint le canal vocal de l'appelant, démarre l'enregistrement,
-  **annonce l'enregistrement** dans le canal texte (consentement RGPD / CGU
-  Discord). Refuse si l'appelant n'est pas en vocal ou si une session est déjà
-  active sur le serveur.
-- `/stop` : clôt la session, transcrit, publie. Refuse s'il n'y a pas de session
+- `/record`: joins the caller's voice channel, starts recording, **announces the
+  recording** in the text channel (GDPR / Discord ToS consent). Refuses if the
+  caller is not in voice or a session is already active on the server.
+- `/stop`: ends the session, transcribes, publishes. Refuses if no session is
   active.
 
-## Gestion d'erreurs
+## Error handling
 
-- **Personne n'a parlé** → message gracieux, pas d'appel Gemini.
-- **Déconnexion vocale en cours de session** → finalisation des fichiers en
-  cours, on n'écrase rien.
-- **Échec de l'appel Gemini** → on conserve audio + timeline, message d'erreur
-  clair dans le canal ; la retranscription manuelle reste possible (les fichiers
-  sont là).
-- **Modules natifs manquants** (sodium, opus) → la connexion vocale échoue ;
-  documenté dans le README.
+- **No one spoke** → graceful message, no Gemini call.
+- **Voice disconnect mid-session** → try to recover; otherwise tear down and free
+  the guild slot so it isn't wedged.
+- **Gemini call failure** → keep audio + timeline, clear error message in the
+  channel; manual re-transcription remains possible (files are there).
+- **Discord posting failure** → reported separately from transcription, so a
+  successful transcript isn't mislabeled as failed.
+- **Missing native modules** (sodium, opus) → voice connection fails; documented
+  in the README.
 
-## Stack & déploiement
+## Stack & deployment
 
-- **Runtime :** Node 22.12+.
-- **Dépendances :** discord.js v14, `@discordjs/voice`, `prism-media`,
+- **Runtime:** Node 22.12+.
+- **Dependencies:** discord.js v14, `@discordjs/voice`, `prism-media`,
   `sodium-native`, `@discordjs/opus`, `ffmpeg-static`, `@google/genai`.
-- **Config (`.env`) :** `DISCORD_TOKEN`, `DISCORD_CLIENT_ID`, `GEMINI_API_KEY`,
-  `GEMINI_MODEL`, `TRANSCRIPT_LANG`, `SILENCE_MS`, `GUILD_ID` (optionnel, pour
-  l'enregistrement rapide des commandes en dev).
-- **Dev :** sur Windows (npm install compile les modules natifs ; prérequis build
-  documentés dans le README).
-- **Prod :** Docker sur Debian (`node:22-bookworm-slim` + `build-essential`),
-  volume monté pour `storage/`.
+- **Config (`.env`):** `DISCORD_TOKEN`, `DISCORD_CLIENT_ID`, `GEMINI_API_KEY`,
+  `GEMINI_MODEL`, `TRANSCRIPT_LANG`, `SILENCE_MS`, `GUILD_ID` (optional, for fast
+  command registration in dev).
+- **Dev:** on Windows (npm install builds the native modules; build
+  prerequisites documented in the README).
+- **Prod:** Docker on Debian (`node:22-bookworm-slim` + `build-essential`),
+  volume mounted for `storage/`.
 
-### Structure du projet
+### Project structure
 
 ```
 src/
@@ -157,12 +162,17 @@ src/
   recording/
     session.js
     recorder.js
+    encode.js
+    registry.js
   transcription/
     gemini.js
+    gemini-core.js
     merge.js
   output/
     publish.js
-storage/              # données par session (audio + json), gitignored
+  util/
+    time.js
+storage/              # per-session data (audio + json), gitignored
 docs/
 Dockerfile
 .env.example
@@ -172,19 +182,18 @@ package.json
 
 ## Tests
 
-- **Unitaires :** `merge.js` (tri/formatage, fonctions pures) et le parsing de la
-  réponse Gemini dans `gemini.js` (SDK mocké). Cadre/factorise la construction de
-  requête pour qu'elle soit testable sans réseau.
-- **Recorder (audio live) :** difficile à tester sans vocal réel → checklist de
-  test manuel ; si faisable, un test du chemin d'écriture OGG avec une fixture de
-  paquets Opus.
-- Transparence sur ce qui est couvert vs vérifié manuellement.
+- **Unit:** `merge.js` (sort/format, pure functions), the parsing/chunking in
+  `gemini-core.js`, the WAV/encode path, and `flushPending`. Request building is
+  factored to be testable without the network.
+- **Recorder (live audio):** hard to test without a real voice connection →
+  manual test checklist; the ffmpeg encode path is covered by a real integration
+  test using the bundled `ffmpeg-static`.
+- Transparency about what is covered vs. manually verified.
 
-## Hors périmètre (YAGNI)
+## Out of scope (YAGNI)
 
-- Transcription temps réel / sous-titres live.
-- STT local (faster-whisper / whisper.cpp) — écarté au profit de Gemini.
-- Bot public multi-serveurs avec gestion fine du consentement par participant.
-- Diarisation (inutile : Discord sépare déjà par utilisateur).
-- Résumé / compte-rendu automatique (extension possible plus tard, pas dans ce
-  périmètre).
+- Real-time transcription / live captions.
+- Local STT (faster-whisper / whisper.cpp) — dropped in favor of Gemini.
+- Public multi-server bot with fine-grained per-participant consent.
+- Diarization (unnecessary: Discord already separates per user).
+- Automatic summary / minutes (possible later, not in this scope).
