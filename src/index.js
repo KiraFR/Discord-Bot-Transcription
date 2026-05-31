@@ -1,0 +1,50 @@
+import { Client, GatewayIntentBits, Events, REST, Routes, MessageFlags } from 'discord.js';
+import { config } from './config.js';
+import * as record from './commands/record.js';
+import * as stop from './commands/stop.js';
+
+const commands = [record, stop];
+const commandMap = new Map(commands.map((c) => [c.data.name, c]));
+
+const client = new Client({
+  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates],
+});
+
+async function registerCommands() {
+  const rest = new REST().setToken(config.discordToken);
+  const body = commands.map((c) => c.data.toJSON());
+  if (config.guildId) {
+    await rest.put(
+      Routes.applicationGuildCommands(config.discordClientId, config.guildId),
+      { body },
+    );
+    console.log(`Commandes enregistrées sur le serveur ${config.guildId}.`);
+  } else {
+    await rest.put(Routes.applicationCommands(config.discordClientId), { body });
+    console.log('Commandes globales enregistrées (propagation jusqu’à ~1h).');
+  }
+}
+
+client.once(Events.ClientReady, (c) => {
+  console.log(`Connecté en tant que ${c.user.tag}.`);
+});
+
+client.on(Events.InteractionCreate, async (interaction) => {
+  if (!interaction.isChatInputCommand()) return;
+  const command = commandMap.get(interaction.commandName);
+  if (!command) return;
+  try {
+    await command.execute(interaction);
+  } catch (err) {
+    console.error(`[interaction] ${interaction.commandName} :`, err);
+    const msg = { content: 'Une erreur est survenue.', flags: MessageFlags.Ephemeral };
+    if (interaction.deferred || interaction.replied) {
+      await interaction.followUp(msg).catch(() => {});
+    } else {
+      await interaction.reply(msg).catch(() => {});
+    }
+  }
+});
+
+await registerCommands();
+await client.login(config.discordToken);

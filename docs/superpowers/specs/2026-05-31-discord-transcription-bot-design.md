@@ -62,11 +62,17 @@ de `gemini.js` sont des fonctions pures testables isolément.
 - À chaque `speaking.start` d'un utilisateur (déduplication via un `Set` pour ne
   s'abonner qu'une fois par prise de parole), on `subscribe` au flux Opus avec
   `EndBehaviorType.AfterSilence` (durée de silence configurable, ~800 ms).
-- **On ne décode pas l'Opus.** Les paquets Opus bruts sont écrits dans un
-  conteneur `.ogg` via `prism-media` (`opus.OggLogicalBitstream`). Pas de ffmpeg,
-  CPU quasi nul.
-- **Un fichier .ogg par prise de parole :**
-  `storage/<guildId>/<sessionId>/<userId>/<index>_<startMs>.ogg`.
+- **Décodage Opus → PCM → WAV, sans ffmpeg.** Le plan initial (écrire l'Opus brut
+  dans un `.ogg` via `prism.opus.OggLogicalBitstream`) a été abandonné : cette API
+  n'existe que dans une version GitHub/beta de `prism-media`, pas dans le npm
+  stable (1.3.5). On décode donc l'Opus en PCM s16le via `prism.opus.Decoder`
+  (backé par `@discordjs/opus`), puis on écrit un **WAV** avec un en-tête RIFF
+  fait main (`recording/wav.js`). Toujours pas de ffmpeg ; coût CPU faible.
+  Contrepartie : fichiers WAV plus volumineux que l'Opus (compensé par le
+  découpage en lots côté Gemini).
+- **Un fichier .wav par prise de parole :**
+  `storage/<guildId>/<sessionId>/<userId>/<index>.wav` (le `startMs` est dans
+  `timeline.json`).
 - En parallèle, `timeline.json` accumule une entrée par prise de parole :
   `{ userId, displayName, index, startMs, endMs }` où `startMs` est relatif au
   début de session. **C'est la source de vérité de l'ordre et des horodatages.**
@@ -76,7 +82,7 @@ de `gemini.js` sont des fonctions pures testables isolément.
 **Stratégie retenue (option A — découpage par prise de parole) :**
 
 - On construit **un appel Gemini** contenant les utterances triées par `startMs`,
-  chacune en *part audio* précédée d'un marqueur texte
+  chacune en *part audio* (`audio/wav`) précédée d'un marqueur texte
   (`Utterance 12 — Alice — 00:03:12`), suivi du **contexte** (noms des
   participants, glossaire/jargon optionnel) et d'un `responseSchema` =
   tableau `{ index, text }`.
