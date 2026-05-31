@@ -40,6 +40,21 @@ function isRetryable(err) {
 }
 
 /**
+ * Errors that won't be fixed by trying other batches (quota/credits exhausted,
+ * billing, bad/forbidden API key). These should abort the whole run so the
+ * caller can report them clearly, rather than being swallowed per-batch.
+ */
+export function isFatalQuotaError(err) {
+  const status = Number(err?.status ?? err?.code);
+  const msg = `${err?.message ?? ''}`;
+  return (
+    status === 401 ||
+    status === 403 ||
+    /RESOURCE_EXHAUSTED|quota|credit|billing|PERMISSION_DENIED|API[_ ]?key|exhausted/i.test(msg)
+  );
+}
+
+/**
  * Call Gemini once for a batch, with retry/backoff on transient errors.
  * Returns the response, or throws after exhausting attempts.
  */
@@ -149,7 +164,11 @@ export async function transcribeSession(timeline, { apiKey, model, lang, glossar
     try {
       results.push(...(await transcribeBatch(ai, entries, meta)));
     } catch (err) {
-      // One failed batch must not lose the rest of the session.
+      // Quota/credits/auth errors won't be fixed by trying other batches — abort
+      // the whole run so the caller can report it clearly (not silently lose
+      // everything to "[missing transcription]").
+      if (isFatalQuotaError(err)) throw err;
+      // Otherwise, one failed batch must not lose the rest of the session.
       console.error(`[gemini] batch [${batch[0].index}..${batch.at(-1).index}] permanently failed: ${err.message}`);
       // Leave these indices absent so merge marks them as missing.
     }

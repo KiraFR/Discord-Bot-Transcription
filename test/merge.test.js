@@ -9,6 +9,7 @@ import {
 } from '../src/transcription/merge.js';
 import { formatTimestamp } from '../src/util/time.js';
 import { parseResponse, chunkBySize, buildParts } from '../src/transcription/gemini-core.js';
+import { isFatalQuotaError } from '../src/transcription/gemini.js';
 
 test('formatTimestamp formats as HH:MM:SS', () => {
   assert.equal(formatTimestamp(0), '00:00:00');
@@ -139,6 +140,17 @@ test('chunkBySize caps batches by utterance count', () => {
   const entries = Array.from({ length: 5 }, (_, i) => ({ index: i, audioBase64: 'a' }));
   const batches = chunkBySize(entries, 1_000_000, 2); // size never the limit
   assert.deepEqual(batches.map((b) => b.length), [2, 2, 1]);
+});
+
+test('isFatalQuotaError flags quota/credits/auth errors but not transient ones', () => {
+  assert.equal(
+    isFatalQuotaError({ status: 429, message: 'RESOURCE_EXHAUSTED: prepayment credits are depleted' }),
+    true,
+  );
+  assert.equal(isFatalQuotaError({ status: 401, message: 'API key invalid' }), true);
+  assert.equal(isFatalQuotaError({ status: 403, message: 'PERMISSION_DENIED' }), true);
+  assert.equal(isFatalQuotaError({ status: 503, message: 'service unavailable' }), false);
+  assert.equal(isFatalQuotaError({ message: 'fetch failed' }), false);
 });
 
 test('buildParts interleaves text marker + audio and starts with the preamble', () => {

@@ -1,9 +1,9 @@
-import { SlashCommandBuilder, MessageFlags } from 'discord.js';
+import { SlashCommandBuilder, MessageFlags, EmbedBuilder } from 'discord.js';
 import { writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { getSession, clearSession } from '../recording/registry.js';
 import { flushPending, stopAllStreams } from '../recording/recorder.js';
-import { transcribeSession } from '../transcription/gemini.js';
+import { transcribeSession, isFatalQuotaError } from '../transcription/gemini.js';
 import { mergeTranscript, renderMarkdown, renderJson, countMissing } from '../transcription/merge.js';
 import { publishTranscript } from '../output/publish.js';
 import { config } from '../config.js';
@@ -64,15 +64,18 @@ export async function execute(interaction) {
     merged = mergeTranscript(session.utterances, results);
   } catch (err) {
     console.error('[stop] transcription failed:', err);
-    const isQuota =
-      err?.status === 429 || /RESOURCE_EXHAUSTED|quota|credits/i.test(err?.message ?? '');
-    const reason = isQuota
-      ? 'Gemini quota / credits exhausted — check your project billing on AI Studio.'
-      : err.message;
-    await safeEdit(
-      interaction,
-      `❌ Transcription failed: ${reason}\nAudio is kept in \`${session.dir}\` to retry.`,
-    );
+    const quota = isFatalQuotaError(err);
+    const embed = new EmbedBuilder()
+      .setColor(0xed4245) // Discord red
+      .setTitle(quota ? '❌ Transcription failed — Gemini quota / credits' : '❌ Transcription failed')
+      .setDescription(
+        quota
+          ? 'Gemini refused the request for a **quota / credits** reason. ' +
+            'Check your project billing on [Google AI Studio](https://aistudio.google.com/).'
+          : `\`\`\`${String(err.message).slice(0, 1000)}\`\`\``,
+      )
+      .setFooter({ text: `Audio kept in ${session.dir} — you can retry.` });
+    await safeEdit(interaction, { embeds: [embed] });
     return;
   }
 
