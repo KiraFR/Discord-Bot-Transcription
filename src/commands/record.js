@@ -27,6 +27,9 @@ export async function execute(interaction) {
     return;
   }
 
+  // ACK immédiat : la connexion vocale peut dépasser la fenêtre de 3 s de Discord.
+  await interaction.deferReply();
+
   // Pré-remplit la table des noms à partir des membres présents dans le vocal.
   const names = new Map();
   for (const [id, member] of voiceChannel.members) {
@@ -53,10 +56,7 @@ export async function execute(interaction) {
     await entersState(connection, VoiceConnectionStatus.Ready, 20_000);
   } catch {
     connection.destroy();
-    await interaction.reply({
-      content: 'Impossible de se connecter au salon vocal.',
-      flags: MessageFlags.Ephemeral,
-    });
+    await interaction.editReply('Impossible de se connecter au salon vocal.');
     return;
   }
 
@@ -64,7 +64,7 @@ export async function execute(interaction) {
   attachRecorder(connection, session, { silenceMs: config.silenceMs });
   setSession(interaction.guildId, session);
 
-  await interaction.reply(
+  await interaction.editReply(
     '🔴 **Enregistrement démarré.** La conversation de ce salon vocal est ' +
       'enregistrée pour transcription. Tapez `/stop` pour terminer.',
   );
