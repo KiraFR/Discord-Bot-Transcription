@@ -1,9 +1,18 @@
 import { formatTimestamp } from '../util/time.js';
 
+// Placeholder used when Gemini returned no entry at all for an utterance index
+// (as opposed to an explicit empty string, which means "inaudible" → dropped).
+export const MISSING_TEXT = '[missing transcription]';
+
 /**
- * Fusionne la timeline (source de vérité de l'ordre et des horodatages) avec
- * les textes renvoyés par Gemini (associés par `index`). Produit une liste
- * d'utterances triées chronologiquement, sans celles dont le texte est vide.
+ * Merge the timeline (source of truth for order and timestamps) with the texts
+ * returned by Gemini (joined by `index`). Produces a chronologically sorted
+ * list of utterances.
+ *
+ * - An index present in the results with empty/whitespace text is treated as
+ *   "inaudible" and dropped.
+ * - An index absent from the results is kept with a visible MISSING_TEXT marker
+ *   so silent data loss (e.g. a truncated Gemini response) is surfaced.
  *
  * @param {Array<{index:number,userId:string,displayName:string,startMs:number,endMs:number}>} timeline
  * @param {Array<{index:number,text:string}>} geminiResults
@@ -11,41 +20,51 @@ import { formatTimestamp } from '../util/time.js';
 export function mergeTranscript(timeline, geminiResults) {
   const textByIndex = new Map(geminiResults.map((r) => [r.index, r.text]));
   return timeline
-    .map((u) => ({
-      index: u.index,
-      startMs: u.startMs,
-      endMs: u.endMs,
-      start: formatTimestamp(u.startMs),
-      end: formatTimestamp(u.endMs),
-      userId: u.userId,
-      speaker: u.displayName,
-      text: (textByIndex.get(u.index) ?? '').trim(),
-    }))
-    .filter((u) => u.text.length > 0)
+    .map((u) => {
+      const present = textByIndex.has(u.index);
+      const text = present ? (textByIndex.get(u.index) ?? '').trim() : MISSING_TEXT;
+      return {
+        index: u.index,
+        startMs: u.startMs,
+        endMs: u.endMs,
+        start: formatTimestamp(u.startMs),
+        end: formatTimestamp(u.endMs),
+        userId: u.userId,
+        speaker: u.displayName,
+        text,
+        missing: !present,
+      };
+    })
+    .filter((u) => u.missing || u.text.length > 0)
     .sort((a, b) => a.startMs - b.startMs);
 }
 
+/** How many merged utterances are missing a transcription (for reporting). */
+export function countMissing(merged) {
+  return merged.filter((u) => u.missing).length;
+}
+
 /**
- * Rend le transcript fusionné en Markdown lisible.
+ * Render the merged transcript as readable Markdown.
  */
 export function renderMarkdown(merged, meta = {}) {
-  const lines = ['# Transcription', ''];
-  if (meta.date) lines.push(`**Date :** ${meta.date}`);
+  const lines = ['# Transcript', ''];
+  if (meta.date) lines.push(`**Date:** ${meta.date}`);
   if (meta.participants?.length) {
-    lines.push(`**Participants :** ${meta.participants.join(', ')}`);
+    lines.push(`**Participants:** ${meta.participants.join(', ')}`);
   }
   if (meta.durationMs != null) {
-    lines.push(`**Durée :** ${formatTimestamp(meta.durationMs)}`);
+    lines.push(`**Duration:** ${formatTimestamp(meta.durationMs)}`);
   }
   lines.push('', '---', '');
   for (const u of merged) {
-    lines.push(`**[${u.start}] ${u.speaker} :** ${u.text}`, '');
+    lines.push(`**[${u.start}] ${u.speaker}:** ${u.text}`, '');
   }
   return lines.join('\n');
 }
 
 /**
- * Rend le transcript fusionné en structure JSON sérialisable.
+ * Render the merged transcript as a serializable JSON structure.
  */
 export function renderJson(merged) {
   return merged.map((u) => ({

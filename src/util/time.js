@@ -1,10 +1,12 @@
 /**
- * Formate une durée en millisecondes vers "HH:MM:SS".
+ * Format a millisecond duration as "HH:MM:SS".
+ * Non-finite or negative input is treated as 0.
  * @param {number} ms
  * @returns {string}
  */
 export function formatTimestamp(ms) {
-  const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+  const safe = Number.isFinite(ms) ? ms : 0;
+  const totalSeconds = Math.max(0, Math.floor(safe / 1000));
   const h = Math.floor(totalSeconds / 3600);
   const m = Math.floor((totalSeconds % 3600) / 60);
   const s = totalSeconds % 60;
