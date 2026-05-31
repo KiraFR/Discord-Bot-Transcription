@@ -1,8 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "PowerShell(npm install 2>&1)",
-      "Bash(npm view *)"
-    ]
-  }
-}

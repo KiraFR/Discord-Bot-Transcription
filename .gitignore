@@ -4,6 +4,7 @@ node_modules/
 # Secrets / config locale
 .env
 .env.local
+.claude/settings.local.json
 
 # Données de session (audio + transcripts générés)
 storage/
