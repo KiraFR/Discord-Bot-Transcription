@@ -2,40 +2,38 @@ import { SlashCommandBuilder, MessageFlags } from 'discord.js';
 import { joinVoiceChannel, entersState, VoiceConnectionStatus } from '@discordjs/voice';
 import { Session } from '../recording/session.js';
 import { attachRecorder } from '../recording/recorder.js';
-import { getSession, setSession } from '../recording/registry.js';
+import { getSession, setSession, clearSession } from '../recording/registry.js';
 import { config } from '../config.js';
 
 export const data = new SlashCommandBuilder()
   .setName('record')
-  .setDescription('Rejoint ton salon vocal et démarre la transcription.');
+  .setDescription('Join your voice channel and start transcribing.')
+  .setDMPermission(false);
 
 export async function execute(interaction) {
   const voiceChannel = interaction.member?.voice?.channel;
 
   if (!voiceChannel) {
     await interaction.reply({
-      content: 'Rejoins d’abord un salon vocal, puis relance `/record`.',
+      content: 'Join a voice channel first, then run `/record`.',
       flags: MessageFlags.Ephemeral,
     });
     return;
   }
   if (getSession(interaction.guildId)) {
     await interaction.reply({
-      content: 'Une session d’enregistrement est déjà en cours sur ce serveur.',
+      content: 'A recording session is already running on this server.',
       flags: MessageFlags.Ephemeral,
     });
     return;
   }
 
-  // ACK immédiat : la connexion vocale peut dépasser la fenêtre de 3 s de Discord.
-  await interaction.deferReply();
-
-  // Pré-remplit la table des noms à partir des membres présents dans le vocal.
+  // Reserve the per-guild slot synchronously (no await between the check above
+  // and setSession) so a concurrent /record can't start a second session.
   const names = new Map();
   for (const [id, member] of voiceChannel.members) {
     names.set(id, member.displayName);
   }
-
   const session = new Session({
     guildId: interaction.guildId,
     voiceChannelId: voiceChannel.id,
@@ -43,43 +41,62 @@ export async function execute(interaction) {
     storageDir: config.storageDir,
     names,
   });
+  setSession(interaction.guildId, session);
+
+  // Immediate ACK: establishing the voice connection can exceed Discord's 3s window.
+  await interaction.deferReply();
 
   const connection = joinVoiceChannel({
     channelId: voiceChannel.id,
     guildId: voiceChannel.guild.id,
     adapterCreator: voiceChannel.guild.voiceAdapterCreator,
-    selfDeaf: false, // CRUCIAL : sinon le bot ne reçoit aucun audio
+    selfDeaf: false, // CRUCIAL: otherwise the bot receives no audio
     selfMute: true,
   });
 
-  // Instrumentation : trace les transitions d'état pour diagnostiquer un échec
-  // de connexion vocale (reste en signalling/connecting, passe en disconnected…).
   connection.on('stateChange', (oldState, newState) => {
-    console.log(`[voice] état : ${oldState.status} -> ${newState.status}`);
+    console.log(`[voice] state: ${oldState.status} -> ${newState.status}`);
   });
   connection.on('error', (err) => {
-    console.error('[voice] erreur de connexion :', err);
+    console.error('[voice] connection error:', err);
+  });
+
+  // If the connection drops mid-session, try to recover; otherwise tear down and
+  // free the guild slot so it doesn't stay wedged as "already recording".
+  connection.on(VoiceConnectionStatus.Disconnected, async () => {
+    try {
+      await Promise.race([
+        entersState(connection, VoiceConnectionStatus.Signalling, 5_000),
+        entersState(connection, VoiceConnectionStatus.Connecting, 5_000),
+      ]);
+      // Reconnecting on its own — let it.
+    } catch {
+      connection.destroy();
+      if (getSession(interaction.guildId) === session) {
+        clearSession(interaction.guildId);
+      }
+    }
   });
 
   try {
     await entersState(connection, VoiceConnectionStatus.Ready, 20_000);
   } catch (err) {
     console.error(
-      `[voice] jamais "ready" en 20 s — dernier état : ${connection.state.status}`,
-      '| détail :',
+      `[voice] never reached "ready" in 20s — last state: ${connection.state.status}`,
+      '| detail:',
       err?.message ?? err,
     );
     connection.destroy();
-    await interaction.editReply('Impossible de se connecter au salon vocal.');
+    clearSession(interaction.guildId);
+    await interaction.editReply('Could not connect to the voice channel.');
     return;
   }
 
   session.connection = connection;
   attachRecorder(connection, session, { silenceMs: config.silenceMs });
-  setSession(interaction.guildId, session);
 
   await interaction.editReply(
-    '🔴 **Enregistrement démarré.** La conversation de ce salon vocal est ' +
-      'enregistrée pour transcription. Tapez `/stop` pour terminer.',
+    '🔴 **Recording started.** This voice channel is being recorded for ' +
+      'transcription. Type `/stop` to finish.',
   );
 }

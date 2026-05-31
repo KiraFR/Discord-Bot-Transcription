@@ -1,22 +1,33 @@
 import { SlashCommandBuilder, MessageFlags } from 'discord.js';
-import { writeFileSync } from 'node:fs';
+import { writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { getSession, clearSession } from '../recording/registry.js';
 import { flushPending, stopAllStreams } from '../recording/recorder.js';
 import { transcribeSession } from '../transcription/gemini.js';
-import { mergeTranscript, renderMarkdown, renderJson } from '../transcription/merge.js';
+import { mergeTranscript, renderMarkdown, renderJson, countMissing } from '../transcription/merge.js';
 import { publishTranscript } from '../output/publish.js';
 import { config } from '../config.js';
 
 export const data = new SlashCommandBuilder()
   .setName('stop')
-  .setDescription('Arrête l’enregistrement, transcrit et publie le résultat.');
+  .setDescription('Stop recording, transcribe and publish the result.')
+  .setDMPermission(false);
+
+// editReply can fail if the interaction token has expired (long sessions);
+// never let that cascade into another throw.
+async function safeEdit(interaction, content) {
+  try {
+    await interaction.editReply(content);
+  } catch (err) {
+    console.error('[stop] editReply failed:', err.message);
+  }
+}
 
 export async function execute(interaction) {
   const session = getSession(interaction.guildId);
   if (!session) {
     await interaction.reply({
-      content: 'Aucune session d’enregistrement en cours.',
+      content: 'No recording session is running.',
       flags: MessageFlags.Ephemeral,
     });
     return;
@@ -25,21 +36,23 @@ export async function execute(interaction) {
 
   await interaction.deferReply();
 
-  // Coupe les captures en cours, attend qu'elles écrivent, puis quitte le vocal.
+  // Cut in-progress captures, wait for them to finalize, then leave voice.
   stopAllStreams(session);
-  console.log(`[stop] arrêt des captures ; attente de ${session.pending.size} en cours…`);
+  console.log(`[stop] stopping captures; waiting for ${session.pending.size} in progress…`);
   await flushPending(session);
-  console.log('[stop] captures terminées.');
+  console.log('[stop] captures done.');
   session.connection?.destroy();
   session.writeTimeline();
 
   if (session.utterances.length === 0) {
-    await interaction.editReply('Personne n’a parlé — rien à transcrire.');
+    await safeEdit(interaction, 'No one spoke — nothing to transcribe.');
     return;
   }
 
+  // 1) Transcribe — a failure here genuinely means transcription failed.
+  let merged;
   try {
-    console.log(`[stop] envoi de ${session.utterances.length} utterance(s) à Gemini (${config.geminiModel})…`);
+    console.log(`[stop] sending ${session.utterances.length} utterance(s) to Gemini (${config.geminiModel})…`);
     const results = await transcribeSession(session.utterances, {
       apiKey: config.geminiApiKey,
       model: config.geminiModel,
@@ -47,39 +60,53 @@ export async function execute(interaction) {
       glossary: config.glossary,
       participants: session.participants(),
     });
-    console.log(`[stop] Gemini a répondu : ${results.length} segment(s).`);
-
-    const merged = mergeTranscript(session.utterances, results);
-    const markdown = renderMarkdown(merged, {
-      date: new Date(session.startTime).toLocaleString('fr-FR'),
-      participants: session.participants(),
-      durationMs: session.durationMs(),
-    });
-    const json = renderJson(merged);
-
-    writeFileSync(path.join(session.dir, 'transcript.md'), markdown, 'utf8');
-    writeFileSync(
-      path.join(session.dir, 'transcript.json'),
-      JSON.stringify(json, null, 2),
-      'utf8',
+    console.log(`[stop] Gemini responded: ${results.length} segment(s).`);
+    merged = mergeTranscript(session.utterances, results);
+  } catch (err) {
+    console.error('[stop] transcription failed:', err);
+    const isQuota =
+      err?.status === 429 || /RESOURCE_EXHAUSTED|quota|credits/i.test(err?.message ?? '');
+    const reason = isQuota
+      ? 'Gemini quota / credits exhausted — check your project billing on AI Studio.'
+      : err.message;
+    await safeEdit(
+      interaction,
+      `❌ Transcription failed: ${reason}\nAudio is kept in \`${session.dir}\` to retry.`,
     );
+    return;
+  }
 
+  // 2) Render + persist artifacts.
+  const markdown = renderMarkdown(merged, {
+    date: new Date(session.startTime).toLocaleString('en-GB'),
+    participants: session.participants(),
+    durationMs: session.durationMs(),
+  });
+  const json = renderJson(merged);
+  try {
+    await writeFile(path.join(session.dir, 'transcript.md'), markdown, 'utf8');
+    await writeFile(path.join(session.dir, 'transcript.json'), JSON.stringify(json, null, 2), 'utf8');
+  } catch (err) {
+    console.error('[stop] writing transcript files failed:', err.message);
+  }
+
+  // 3) Publish — a failure here means posting failed, NOT transcription.
+  try {
     await publishTranscript(session.textChannel, {
       markdown,
       json,
-      meta: { participants: session.participants(), utteranceCount: merged.length },
+      meta: {
+        participants: session.participants(),
+        utteranceCount: merged.length,
+        missingCount: countMissing(merged),
+      },
     });
-    await interaction.editReply('✅ Transcription publiée.');
+    await safeEdit(interaction, '✅ Transcript published.');
   } catch (err) {
-    console.error('[stop] transcription échouée :', err);
-    const isQuota =
-      err?.status === 429 || /RESOURCE_EXHAUSTED|quota|credits|crédits/i.test(err?.message ?? '');
-    const reason = isQuota
-      ? 'quota / crédits Gemini épuisés — vérifie la facturation de ton projet sur AI Studio.'
-      : err.message;
-    await interaction.editReply(
-      `❌ La transcription a échoué : ${reason}\n` +
-        `L’audio est conservé dans \`${session.dir}\` pour réessayer.`,
+    console.error('[stop] publishing failed:', err);
+    await safeEdit(
+      interaction,
+      `⚠️ Transcription succeeded but posting failed: ${err.message}\nFiles are saved in \`${session.dir}\`.`,
     );
   }
 }
