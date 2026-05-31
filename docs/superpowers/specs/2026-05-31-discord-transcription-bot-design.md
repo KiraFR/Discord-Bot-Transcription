@@ -62,16 +62,18 @@ de `gemini.js` sont des fonctions pures testables isolément.
 - À chaque `speaking.start` d'un utilisateur (déduplication via un `Set` pour ne
   s'abonner qu'une fois par prise de parole), on `subscribe` au flux Opus avec
   `EndBehaviorType.AfterSilence` (durée de silence configurable, ~800 ms).
-- **Décodage Opus → PCM → WAV, sans ffmpeg.** Le plan initial (écrire l'Opus brut
-  dans un `.ogg` via `prism.opus.OggLogicalBitstream`) a été abandonné : cette API
-  n'existe que dans une version GitHub/beta de `prism-media`, pas dans le npm
-  stable (1.3.5). On décode donc l'Opus en PCM s16le via `prism.opus.Decoder`
-  (backé par `@discordjs/opus`), puis on écrit un **WAV** avec un en-tête RIFF
-  fait main (`recording/wav.js`). Toujours pas de ffmpeg ; coût CPU faible.
-  Contrepartie : fichiers WAV plus volumineux que l'Opus (compensé par le
-  découpage en lots côté Gemini).
-- **Un fichier .wav par prise de parole :**
-  `storage/<guildId>/<sessionId>/<userId>/<index>.wav` (le `startMs` est dans
+- **Décodage Opus → PCM → ffmpeg → Opus/Ogg 16 kHz mono.** Le plan initial
+  (écrire l'Opus brut via `prism.opus.OggLogicalBitstream`) a été abandonné :
+  cette API n'existe que dans une version GitHub/beta de `prism-media`, pas dans
+  le npm stable (1.3.5). On décode donc l'Opus en PCM s16le via
+  `prism.opus.Decoder` (backé par `@discordjs/opus`), puis on **ré-encode via
+  ffmpeg** (`recording/encode.js`) en **Opus/Ogg 16 kHz mono** (~24 kbps). Le
+  binaire ffmpeg est fourni par le paquet `ffmpeg-static` (aucune installation
+  système). Gemini ré-échantillonnant à 16 kHz en interne, le mono 16 kHz ne
+  dégrade pas la transcription, et les fichiers sont ~60× plus petits qu'un WAV
+  48 kHz stéréo : une session entière tient souvent dans un seul appel Gemini.
+- **Un fichier .ogg par prise de parole :**
+  `storage/<guildId>/<sessionId>/<userId>/<index>.ogg` (le `startMs` est dans
   `timeline.json`).
 - En parallèle, `timeline.json` accumule une entrée par prise de parole :
   `{ userId, displayName, index, startMs, endMs }` où `startMs` est relatif au
@@ -82,7 +84,7 @@ de `gemini.js` sont des fonctions pures testables isolément.
 **Stratégie retenue (option A — découpage par prise de parole) :**
 
 - On construit **un appel Gemini** contenant les utterances triées par `startMs`,
-  chacune en *part audio* (`audio/wav`) précédée d'un marqueur texte
+  chacune en *part audio* (`audio/ogg`) précédée d'un marqueur texte
   (`Utterance 12 — Alice — 00:03:12`), suivi du **contexte** (noms des
   participants, glossaire/jargon optionnel) et d'un `responseSchema` =
   tableau `{ index, text }`.
@@ -134,7 +136,7 @@ Au-delà de l'inline (~20 Mo), bascule sur la File API de Gemini.
 
 - **Runtime :** Node 22.12+.
 - **Dépendances :** discord.js v14, `@discordjs/voice`, `prism-media`,
-  `sodium-native`, `@discordjs/opus`, `@google/genai`.
+  `sodium-native`, `@discordjs/opus`, `ffmpeg-static`, `@google/genai`.
 - **Config (`.env`) :** `DISCORD_TOKEN`, `DISCORD_CLIENT_ID`, `GEMINI_API_KEY`,
   `GEMINI_MODEL`, `TRANSCRIPT_LANG`, `SILENCE_MS`, `GUILD_ID` (optionnel, pour
   l'enregistrement rapide des commandes en dev).

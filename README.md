@@ -10,7 +10,7 @@ quoi, dans l'ordre, horodaté). Le résultat est publié dans le canal texte.
 ## Comment ça marche
 
 - `/record` → le bot rejoint ton salon vocal, **annonce l'enregistrement** et
-  capture le flux audio de chaque utilisateur dans un `.wav` distinct (un fichier
+  capture le flux audio de chaque utilisateur dans un `.ogg` distinct (un fichier
   par prise de parole), en loggant le timing dans `timeline.json`.
 - `/stop` → le bot quitte le vocal, envoie l'audio + le contexte à Gemini,
   reçoit le texte par prise de parole, le fusionne chronologiquement à partir de
@@ -18,7 +18,10 @@ quoi, dans l'ordre, horodaté). Le résultat est publié dans le canal texte.
 
 Discord livre déjà un flux audio **séparé par utilisateur** : aucune diarisation
 à faire, un fichier = un locuteur. L'Opus est décodé en PCM (via
-`@discordjs/opus`) puis écrit en WAV — sans ffmpeg.
+`@discordjs/opus`) puis ré-encodé en **Opus/Ogg 16 kHz mono** via ffmpeg —
+fichiers minuscules, qualité de transcription intacte (Gemini ré-échantillonne à
+16 kHz de toute façon). Le binaire ffmpeg est fourni par `ffmpeg-static` : aucune
+installation système requise.
 
 > ⚠️ **RGPD / consentement.** Le bot envoie la voix des participants à Google
 > (API Gemini) et l'annonce au démarrage. Prévu pour un serveur privé avec des
@@ -29,6 +32,8 @@ Discord livre déjà un flux audio **séparé par utilisateur** : aucune diarisa
 - **Node.js ≥ 22.12**
 - Un **bot Discord** (token + client ID)
 - Une **clé API Gemini** (Google AI Studio)
+- **ffmpeg** : pas besoin de l'installer, le binaire est fourni par le paquet
+  `ffmpeg-static` (téléchargé pendant `npm install`).
 - Pour l'installation des modules natifs (`sodium-native`, `@discordjs/opus`) :
   - **Windows** : généralement des binaires précompilés sont récupérés
     automatiquement. En cas d'échec de compilation, installe les outils de build
@@ -107,8 +112,8 @@ src/
   commands/record.js        # /record : rejoint le vocal, démarre la capture
   commands/stop.js          # /stop  : transcrit, fusionne, publie
   recording/session.js      # état d'une session (chemins, timeline, noms)
-  recording/recorder.js     # capture Opus -> PCM -> .wav + log du timing
-  recording/wav.js          # écriture d'un en-tête WAV (pur, testé)
+  recording/recorder.js     # capture Opus -> PCM -> ffmpeg -> .ogg + log du timing
+  recording/encode.js       # ré-encodage PCM -> Opus/Ogg 16k mono (ffmpeg)
   recording/registry.js     # sessions actives par serveur
   transcription/gemini.js       # appel réseau Gemini
   transcription/gemini-core.js  # construction requête / parsing (pur, testé)

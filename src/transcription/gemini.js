@@ -36,7 +36,7 @@ export async function transcribeSession(timeline, { apiKey, model, lang, glossar
       displayName: u.displayName,
       startMs: u.startMs,
       audioBase64: buf.toString('base64'),
-      mimeType: 'audio/wav',
+      mimeType: 'audio/ogg',
     });
   }
 

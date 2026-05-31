@@ -34,7 +34,7 @@ export class Session {
     const index = this.nextIndex++;
     const userDir = path.join(this.dir, userId);
     mkdirSync(userDir, { recursive: true });
-    const file = path.join(userDir, `${String(index).padStart(4, '0')}.wav`);
+    const file = path.join(userDir, `${String(index).padStart(4, '0')}.ogg`);
     return { index, file };
   }
 

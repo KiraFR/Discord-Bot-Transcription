@@ -34,7 +34,7 @@ export function buildParts(entries, meta) {
       text: `Utterance ${e.index} — ${e.displayName} — ${formatTimestamp(e.startMs)}`,
     });
     parts.push({
-      inlineData: { mimeType: e.mimeType ?? 'audio/wav', data: e.audioBase64 },
+      inlineData: { mimeType: e.mimeType ?? 'audio/ogg', data: e.audioBase64 },
     });
   }
   return parts;

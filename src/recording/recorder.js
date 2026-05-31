@@ -1,16 +1,16 @@
 import { EndBehaviorType } from '@discordjs/voice';
 import prism from 'prism-media';
-import { writeFile } from 'node:fs/promises';
-import { pipeline } from 'node:stream/promises';
-import { pcmToWav } from './wav.js';
+import { encodePcmToOpus } from './encode.js';
 
 const SAMPLE_RATE = 48000;
 const CHANNELS = 2;
+const OUT_RATE = 16000; // Gemini ré-échantillonne à 16 kHz : inutile d'envoyer plus
+const BITRATE = '24k';
 
 /**
  * Branche l'enregistrement sur une connexion vocale : à chaque prise de parole,
- * capture le flux Opus de l'utilisateur, le décode en PCM, écrit un WAV et
- * logge son timing.
+ * capture le flux Opus, le décode en PCM, le ré-encode en Opus/Ogg 16 kHz mono
+ * (via ffmpeg) et logge son timing.
  */
 export function attachRecorder(connection, session, { silenceMs = 800 } = {}) {
   const receiver = connection.receiver;
@@ -40,24 +40,21 @@ async function captureUtterance(receiver, userId, session, silenceMs) {
     end: { behavior: EndBehaviorType.AfterSilence, duration: silenceMs },
   });
 
-  // Décodage Opus -> PCM s16le via @discordjs/opus (pas de ffmpeg).
+  // Opus 48 kHz stéréo -> PCM s16le (via @discordjs/opus).
   const decoder = new prism.opus.Decoder({
     rate: SAMPLE_RATE,
     channels: CHANNELS,
     frameSize: 960,
   });
+  opusStream.on('error', (err) => decoder.destroy(err));
 
-  const chunks = [];
-  await pipeline(opusStream, decoder, async (source) => {
-    for await (const chunk of source) chunks.push(chunk);
+  // PCM -> ffmpeg -> Opus/Ogg 16 kHz mono.
+  await encodePcmToOpus(opusStream.pipe(decoder), file, {
+    inRate: SAMPLE_RATE,
+    inChannels: CHANNELS,
+    outRate: OUT_RATE,
+    bitrate: BITRATE,
   });
-
-  const wav = pcmToWav(Buffer.concat(chunks), {
-    sampleRate: SAMPLE_RATE,
-    channels: CHANNELS,
-    bitDepth: 16,
-  });
-  await writeFile(file, wav);
 
   session.commitUtterance({
     index,
