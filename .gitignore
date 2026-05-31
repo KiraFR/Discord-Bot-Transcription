@@ -1,13 +1,16 @@
-# Dépendances
+# Dependencies
 node_modules/
 
-# Secrets / config locale
+# Secrets / local config
 .env
 .env.local
 .claude/settings.local.json
 
-# Données de session (audio + transcripts générés)
+# Session data (recorded audio + generated transcripts)
 storage/
+
+# Scratch / diagnostic scripts
+tmp_*
 
 # Logs
 *.log
