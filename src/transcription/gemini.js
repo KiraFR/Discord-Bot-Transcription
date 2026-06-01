@@ -94,11 +94,22 @@ async function generateWithRetry(ai, { model, parts, label }) {
   throw lastErr;
 }
 
+/** Accumulate a response's token usage into the running tally (billed even when truncated). */
+function addUsage(usage, response) {
+  const u = response?.usageMetadata;
+  if (!u) return;
+  const prompt = u.promptTokenCount ?? 0;
+  const output = u.candidatesTokenCount ?? 0;
+  usage.promptTokens += prompt;
+  usage.outputTokens += output;
+  usage.totalTokens += u.totalTokenCount ?? prompt + output;
+}
+
 /** Split a batch in two and transcribe each half (used when a request is too heavy). */
-async function splitAndTranscribe(ai, batch, meta) {
+async function splitAndTranscribe(ai, batch, meta, usage) {
   const mid = Math.ceil(batch.length / 2);
-  const left = await transcribeBatch(ai, batch.slice(0, mid), meta);
-  const right = await transcribeBatch(ai, batch.slice(mid), meta);
+  const left = await transcribeBatch(ai, batch.slice(0, mid), meta, usage);
+  const right = await transcribeBatch(ai, batch.slice(mid), meta, usage);
   return [...left, ...right];
 }
 
@@ -106,9 +117,9 @@ async function splitAndTranscribe(ai, batch, meta) {
  * Transcribe one batch of utterances. Adaptive: if the request times out / is
  * overloaded, or the model truncates the JSON (MAX_TOKENS) or returns no text,
  * and the batch holds more than one utterance, split it in half and recurse.
- * Returns parsed { index, text } entries.
+ * Token usage is accumulated into `usage`. Returns parsed { index, text } entries.
  */
-async function transcribeBatch(ai, batch, meta) {
+async function transcribeBatch(ai, batch, meta, usage) {
   const label = `batch[${batch[0].index}..${batch.at(-1).index}]`;
 
   let response;
@@ -122,17 +133,19 @@ async function transcribeBatch(ai, batch, meta) {
     if (isFatalQuotaError(err)) throw err; // abort whole run; caller reports it
     if (batch.length > 1 && (isOverloadedOrTimeout(err) || isRetryable(err))) {
       console.warn(`[gemini] ${label} ${err.message} — splitting into smaller batches.`);
-      return splitAndTranscribe(ai, batch, meta);
+      return splitAndTranscribe(ai, batch, meta, usage);
     }
     throw err; // single utterance or non-splittable error → caller marks missing
   }
+
+  addUsage(usage, response); // count tokens even if we end up splitting below
 
   const finishReason = response?.candidates?.[0]?.finishReason;
   const blockReason = response?.promptFeedback?.blockReason;
 
   if ((finishReason === 'MAX_TOKENS' || !response.text) && batch.length > 1) {
     console.warn(`[gemini] ${label} truncated/incomplete (finishReason=${finishReason}) — splitting in two.`);
-    return splitAndTranscribe(ai, batch, meta);
+    return splitAndTranscribe(ai, batch, meta, usage);
   }
 
   if (!response.text) {
@@ -152,10 +165,11 @@ async function transcribeBatch(ai, batch, meta) {
  * texts for that batch rather than failing the whole session.
  *
  * @param {Array<{index:number,displayName:string,startMs:number,file:string}>} timeline
- * @returns {Promise<Array<{index:number,text:string}>>}
+ * @returns {Promise<{results: Array<{index:number,text:string}>, usage: {promptTokens:number,outputTokens:number,totalTokens:number}}>}
  */
 export async function transcribeSession(timeline, { apiKey, model, lang, glossary, participants }) {
-  if (timeline.length === 0) return [];
+  const usage = { promptTokens: 0, outputTokens: 0, totalTokens: 0 };
+  if (timeline.length === 0) return { results: [], usage };
 
   const sorted = [...timeline].sort((a, b) => a.startMs - b.startMs);
 
@@ -191,7 +205,7 @@ export async function transcribeSession(timeline, { apiKey, model, lang, glossar
     }
 
     try {
-      results.push(...(await transcribeBatch(ai, entries, meta)));
+      results.push(...(await transcribeBatch(ai, entries, meta, usage)));
     } catch (err) {
       // Quota/credits/auth errors won't be fixed by trying other batches — abort
       // the whole run so the caller can report it clearly (not silently lose
@@ -203,5 +217,5 @@ export async function transcribeSession(timeline, { apiKey, model, lang, glossar
     }
   }
 
-  return results;
+  return { results, usage };
 }

@@ -51,17 +51,22 @@ export async function execute(interaction) {
 
   // 1) Transcribe — a failure here genuinely means transcription failed.
   let merged;
+  let usage = { promptTokens: 0, outputTokens: 0, totalTokens: 0 };
   try {
     console.log(`[stop] sending ${session.utterances.length} utterance(s) to Gemini (${config.geminiModel})…`);
-    const results = await transcribeSession(session.utterances, {
+    const out = await transcribeSession(session.utterances, {
       apiKey: config.geminiApiKey,
       model: config.geminiModel,
       lang: config.transcriptLang,
       glossary: config.glossary,
       participants: session.participants(),
     });
-    console.log(`[stop] Gemini responded: ${results.length} segment(s).`);
-    merged = mergeTranscript(session.utterances, results);
+    usage = out.usage;
+    console.log(
+      `[stop] Gemini responded: ${out.results.length} segment(s); ` +
+        `tokens total ${usage.totalTokens} (prompt ${usage.promptTokens} / output ${usage.outputTokens}).`,
+    );
+    merged = mergeTranscript(session.utterances, out.results);
   } catch (err) {
     console.error('[stop] transcription failed:', err);
     const quota = isFatalQuotaError(err);
@@ -102,6 +107,7 @@ export async function execute(interaction) {
         participants: session.participants(),
         utteranceCount: merged.length,
         missingCount: countMissing(merged),
+        tokens: usage,
       },
     });
     await safeEdit(interaction, '✅ Transcript published.');

@@ -31,6 +31,13 @@ export async function publishTranscript(textChannel, { markdown, json, meta }) {
   const lines = [
     `📝 **Transcript ready** — ${meta.utteranceCount} turn(s), ${meta.participants.length} participant(s).`,
   ];
+  if (meta.tokens?.totalTokens) {
+    const t = meta.tokens;
+    lines.push(
+      `🔢 ${t.totalTokens.toLocaleString('en-US')} tokens ` +
+        `(in ${t.promptTokens.toLocaleString('en-US')} / out ${t.outputTokens.toLocaleString('en-US')}).`,
+    );
+  }
   if (meta.missingCount) {
     lines.push(`⚠️ ${meta.missingCount} turn(s) could not be transcribed (marked in the transcript).`);
   }
