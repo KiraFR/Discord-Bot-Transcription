@@ -124,6 +124,8 @@ large sessions is a future enhancement (not yet implemented).
   caller is not in voice or a session is already active on the server.
 - `/stop`: ends the session, transcribes, publishes. Refuses if no session is
   active.
+- `/cancel`: ends the session, leaves voice, **discards the recorded audio** and
+  transcribes nothing (never sent to Gemini). Refuses if no session is active.
 
 ## Error handling
 

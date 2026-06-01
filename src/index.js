@@ -2,8 +2,9 @@ import { Client, GatewayIntentBits, Events, REST, Routes, MessageFlags } from 'd
 import { config } from './config.js';
 import * as record from './commands/record.js';
 import * as stop from './commands/stop.js';
+import * as cancel from './commands/cancel.js';
 
-const commands = [record, stop];
+const commands = [record, stop, cancel];
 const commandMap = new Map(commands.map((c) => [c.data.name, c]));
 
 const client = new Client({

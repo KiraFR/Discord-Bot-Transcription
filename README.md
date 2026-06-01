@@ -16,6 +16,8 @@ order, timestamped). The result is posted in the text channel.
 - `/stop` → the bot leaves the voice channel, sends the audio + context to
   Gemini, gets back the text per utterance, merges it chronologically from the
   timeline, and posts `transcript.md` + `transcript.json` in the channel.
+- `/cancel` → the bot leaves the voice channel, **discards the recorded audio**
+  and transcribes nothing (never sent to Gemini).
 
 Discord already delivers a **per-user audio stream**: no diarization needed, one
 file = one speaker. Opus is decoded to PCM (via `@discordjs/opus`) then
@@ -109,6 +111,7 @@ src/
   config.js                 # loads/validates .env
   commands/record.js        # /record: joins voice, starts capture
   commands/stop.js          # /stop: transcribes, merges, publishes
+  commands/cancel.js        # /cancel: stops & discards, no transcription
   recording/session.js      # session state (paths, timeline, names)
   recording/recorder.js     # capture Opus -> PCM -> ffmpeg -> .ogg + timing log
   recording/encode.js       # re-encode PCM -> Opus/Ogg 16k mono (ffmpeg)
