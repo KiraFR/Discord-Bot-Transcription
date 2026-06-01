@@ -18,25 +18,34 @@ const RESPONSE_SCHEMA = {
 // request limit, leaving headroom for markers/preamble/JSON overhead.
 // Sessions larger than this are split across several requests.
 const MAX_BATCH_BASE64 = 8 * 1024 * 1024;
-// Also cap the number of utterances per request so a long meeting doesn't
-// produce a single request with hundreds of audio parts.
-const MAX_BATCH_UTTERANCES = 150;
+// Also cap the number of utterances per request. Large requests (many audio
+// parts) make Gemini exceed its own processing deadline (504 DEADLINE_EXCEEDED),
+// so keep batches small; oversized ones are split adaptively (see transcribeBatch).
+const MAX_BATCH_UTTERANCES = 40;
 // base64 inflates raw bytes by ~4/3.
 const BASE64_RATIO = 4 / 3;
 
 const MAX_OUTPUT_TOKENS = 65536;
 const REQUEST_TIMEOUT_MS = 120_000;
 const MAX_ATTEMPTS = 4;
-const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
+// Transient errors worth retrying at the SAME size (server-side blips/overload).
+// 504/DEADLINE_EXCEEDED is deliberately excluded: it means the request is too
+// heavy, so we split it smaller instead of retrying identically.
+const RETRYABLE_STATUS = new Set([429, 500, 502, 503]);
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function isRetryable(err) {
-  const status = err?.status ?? err?.code;
-  if (RETRYABLE_STATUS.has(Number(status))) return true;
-  return /\b(429|503|500|502|504|timeout|ECONNRESET|ETIMEDOUT|fetch failed)\b/i.test(
-    err?.message ?? '',
-  );
+  const status = Number(err?.status ?? err?.code);
+  if (RETRYABLE_STATUS.has(status)) return true;
+  return /\b(500|502|503|ECONNRESET|ETIMEDOUT)\b|fetch failed/i.test(err?.message ?? '');
+}
+
+// A too-heavy request (timeout / deadline / gateway timeout): retrying the same
+// size won't help — split it into smaller batches instead.
+function isOverloadedOrTimeout(err) {
+  const status = Number(err?.status ?? err?.code);
+  return status === 504 || /DEADLINE_EXCEEDED|timed out|timeout/i.test(err?.message ?? '');
 }
 
 /**
@@ -85,25 +94,45 @@ async function generateWithRetry(ai, { model, parts, label }) {
   throw lastErr;
 }
 
+/** Split a batch in two and transcribe each half (used when a request is too heavy). */
+async function splitAndTranscribe(ai, batch, meta) {
+  const mid = Math.ceil(batch.length / 2);
+  const left = await transcribeBatch(ai, batch.slice(0, mid), meta);
+  const right = await transcribeBatch(ai, batch.slice(mid), meta);
+  return [...left, ...right];
+}
+
 /**
- * Transcribe one batch of utterances. If the model truncates the JSON
- * (finishReason MAX_TOKENS) and the batch holds more than one utterance, split
- * it in half and recurse. Returns parsed { index, text } entries.
+ * Transcribe one batch of utterances. Adaptive: if the request times out / is
+ * overloaded, or the model truncates the JSON (MAX_TOKENS) or returns no text,
+ * and the batch holds more than one utterance, split it in half and recurse.
+ * Returns parsed { index, text } entries.
  */
 async function transcribeBatch(ai, batch, meta) {
-  const parts = buildParts(batch, meta);
   const label = `batch[${batch[0].index}..${batch.at(-1).index}]`;
-  const response = await generateWithRetry(ai, { model: meta.model, parts, label });
+
+  let response;
+  try {
+    response = await generateWithRetry(ai, {
+      model: meta.model,
+      parts: buildParts(batch, meta),
+      label,
+    });
+  } catch (err) {
+    if (isFatalQuotaError(err)) throw err; // abort whole run; caller reports it
+    if (batch.length > 1 && (isOverloadedOrTimeout(err) || isRetryable(err))) {
+      console.warn(`[gemini] ${label} ${err.message} — splitting into smaller batches.`);
+      return splitAndTranscribe(ai, batch, meta);
+    }
+    throw err; // single utterance or non-splittable error → caller marks missing
+  }
 
   const finishReason = response?.candidates?.[0]?.finishReason;
   const blockReason = response?.promptFeedback?.blockReason;
 
   if ((finishReason === 'MAX_TOKENS' || !response.text) && batch.length > 1) {
-    const mid = Math.ceil(batch.length / 2);
     console.warn(`[gemini] ${label} truncated/incomplete (finishReason=${finishReason}) — splitting in two.`);
-    const left = await transcribeBatch(ai, batch.slice(0, mid), meta);
-    const right = await transcribeBatch(ai, batch.slice(mid), meta);
-    return [...left, ...right];
+    return splitAndTranscribe(ai, batch, meta);
   }
 
   if (!response.text) {
